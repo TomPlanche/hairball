@@ -6,7 +6,7 @@ The planned sources are ATProto (Bluesky, Tangled, standard.site), Gitea/Forgejo
 
 ## Status
 
-The project is at an early stage. The command-line interface exists, but all commands return a "not implemented yet" error.
+The project is at an early stage. The CLI loads and validates the config file. The `status` command lists the configured sources. The other commands return a "not implemented yet" error.
 
 ## Requirements
 
@@ -23,7 +23,7 @@ The binary is `target/release/hairball`.
 ## Usage
 
 ```
-hairball <command>
+hairball [--config <path>] <command>
 
   sync [--source <id>] [--full]   Run all enabled sources, or only one.
   export [--year <YYYY>] [--out <path>]
@@ -34,9 +34,18 @@ hairball <command>
 
 Run `hairball --help` or `hairball <command> --help` for the full list of options.
 
+## Configuration
+
+The CLI reads `config.toml` in the current directory. Use `--config <path>` to read another file.
+
+1. Copy `config.example.toml` to `config.toml`.
+2. Edit the sections of the sources you use. Remove the other sections.
+
+The CLI validates the config at startup. It reports all the errors at once, with the TOML path of each error. Git ignores `config.toml`.
+
 ## Secrets
 
-The CLI reads secrets from environment variables only. The config file will hold the variable names, never the values.
+The CLI reads secrets from environment variables only. The config file holds the variable names, never the values.
 
 1. Copy `.env.example` to `.env`.
 2. Fill in the values you need. Leave the others empty.
@@ -67,7 +76,9 @@ cargo run -- --help
 ```
 
 ```bash
-cargo run -- sync --full
+cargo run -- --config config.example.toml status
 ```
 
-The second command must print `Error: `sync` is not implemented yet (source: None, full: true)` and exit with code 1.
+This command must list 6 sources: `atproto`, `bsky_bookmarks` (disabled), `gitea:codeberg`, `gitea:forge-perso` (skipped, mirror), `github` and `lastfm`.
+
+To see the validation, put a bad value in a copy of the config, for example `timezone = ""`. The command must then print the error with its TOML path and exit with code 1.

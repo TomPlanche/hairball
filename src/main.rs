@@ -1,12 +1,20 @@
+mod config;
+
 use std::path::PathBuf;
 
-use anyhow::bail;
+use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
+
+use crate::config::Config;
 
 /// Collect my public activity from many platforms into one SQLite file.
 #[derive(Debug, Parser)]
 #[command(version, about)]
 struct Cli {
+    /// Path to the TOML config file.
+    #[arg(long, global = true, default_value = "config.toml")]
+    config: PathBuf,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -48,6 +56,8 @@ enum Command {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let config = Config::load(&cli.config)
+        .with_context(|| format!("cannot load the config file {}", cli.config.display()))?;
 
     match cli.command {
         Command::Sync { source, full } => {
@@ -56,8 +66,29 @@ fn main() -> anyhow::Result<()> {
         Command::Export { year, out } => {
             bail!("`export` is not implemented yet (year: {year:?}, out: {out:?})")
         }
-        Command::Status => bail!("`status` is not implemented yet"),
+        Command::Status => {
+            status(&config);
+            Ok(())
+        }
         Command::Purge { kind } => bail!("`purge` is not implemented yet (kind: {kind})"),
+    }
+}
+
+/// Prints the configured sources and their state.
+fn status(config: &Config) {
+    println!("database: {}", config.database.display());
+    println!("timezone: {}", config.timezone);
+    println!();
+
+    let sources = config.sources();
+    if sources.is_empty() {
+        println!("no source configured");
+        return;
+    }
+
+    let width = sources.iter().map(|s| s.id.len()).max().unwrap_or(0);
+    for source in &sources {
+        println!("{:width$}  {}", source.id, source.state);
     }
 }
 

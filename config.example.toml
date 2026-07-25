@@ -1,0 +1,39 @@
+# Copy this file to `config.toml` and edit it.
+# Secrets never go in this file: it holds only the names of the
+# environment variables that contain them (see `.env.example`).
+
+timezone = "Europe/Paris"
+database = "hairball.db"
+
+[atproto]
+handle = "tomplanche.com"           # or a DID
+exclude = ["app.bsky.graph.follow"] # NSIDs or NSID prefixes to ignore
+
+[atproto.bluesky]                   # fine-grained toggles for app.bsky.*
+posts = true      # app.bsky.feed.post
+likes = true      # app.bsky.feed.like
+reposts = false   # app.bsky.feed.repost
+
+[bsky_bookmarks]
+enabled = false
+identifier = "tomplanche.com"
+app_password_env = "BSKY_APP_PASSWORD"
+
+[[gitea]]
+name = "codeberg"
+url = "https://codeberg.org"
+user = "TomPlanche"
+
+[[gitea]]
+name = "forge-perso"
+url = "https://git.example.com"
+user = "tom"
+mirror = true                       # skipped: mirrors Tangled
+
+[github]
+user = "TomPlanche"
+token_env = "GITHUB_TOKEN"
+
+[lastfm]
+user = "CHANGE_ME"
+api_key_env = "LASTFM_API_KEY"

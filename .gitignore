@@ -1,4 +1,5 @@
 /target
 
-# Local secrets
+# Local config and secrets
+/config.toml
 .env
