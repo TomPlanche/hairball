@@ -1,5 +1,7 @@
 /target
 
-# Local config and secrets
+# Local config, secrets and data
 /config.toml
 .env
+*.db
+*.db-journal

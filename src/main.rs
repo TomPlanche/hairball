@@ -1,11 +1,10 @@
-mod config;
-
 use std::path::PathBuf;
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
-
-use crate::config::Config;
+use hairball::{config::Config, db};
+use jiff::Timestamp;
+use sqlx::SqlitePool;
 
 /// Collect my public activity from many platforms into one SQLite file.
 #[derive(Debug, Parser)]
@@ -54,7 +53,8 @@ enum Command {
     },
 }
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let config = Config::load(&cli.config)
         .with_context(|| format!("cannot load the config file {}", cli.config.display()))?;
@@ -67,15 +67,21 @@ fn main() -> anyhow::Result<()> {
             bail!("`export` is not implemented yet (year: {year:?}, out: {out:?})")
         }
         Command::Status => {
-            status(&config);
-            Ok(())
+            let db = open_db(&config).await?;
+            status(&config, &db).await
         }
         Command::Purge { kind } => bail!("`purge` is not implemented yet (kind: {kind})"),
     }
 }
 
-/// Prints the configured sources and their state.
-fn status(config: &Config) {
+async fn open_db(config: &Config) -> anyhow::Result<SqlitePool> {
+    db::open(&config.database)
+        .await
+        .with_context(|| format!("cannot open the database {}", config.database.display()))
+}
+
+/// Prints each configured source: state, last run, row counts and cursor.
+async fn status(config: &Config, db: &SqlitePool) -> anyhow::Result<()> {
     println!("database: {}", config.database.display());
     println!("timezone: {}", config.timezone);
     println!();
@@ -83,12 +89,60 @@ fn status(config: &Config) {
     let sources = config.sources();
     if sources.is_empty() {
         println!("no source configured");
-        return;
+        return Ok(());
     }
 
-    let width = sources.iter().map(|s| s.id.len()).max().unwrap_or(0);
+    let mut rows = vec![
+        [
+            "SOURCE",
+            "STATE",
+            "LAST RUN (UTC)",
+            "EVENTS",
+            "DELETED",
+            "DAYS",
+            "CURSOR",
+        ]
+        .map(str::to_owned),
+    ];
     for source in &sources {
-        println!("{:width$}  {}", source.id, source.state);
+        let stats = db::source_stats(db, &source.id).await?;
+        rows.push([
+            source.id.clone(),
+            source.state.to_string(),
+            stats
+                .state
+                .last_run
+                .map_or_else(|| "never".to_owned(), format_time),
+            stats.events.to_string(),
+            stats.deleted.to_string(),
+            stats.days.to_string(),
+            stats.state.cursor.unwrap_or_else(|| "-".to_owned()),
+        ]);
+    }
+    print_table(&rows);
+    Ok(())
+}
+
+/// Formats unix seconds as an RFC 3339 UTC time.
+fn format_time(seconds: i64) -> String {
+    Timestamp::from_second(seconds).map_or_else(|_| seconds.to_string(), |t| t.to_string())
+}
+
+/// Prints rows as left-aligned columns.
+fn print_table<const N: usize>(rows: &[[String; N]]) {
+    let mut widths = [0; N];
+    for row in rows {
+        for (width, cell) in widths.iter_mut().zip(row) {
+            *width = (*width).max(cell.chars().count());
+        }
+    }
+    for row in rows {
+        let line: Vec<_> = row
+            .iter()
+            .zip(widths)
+            .map(|(cell, width)| format!("{cell:width$}"))
+            .collect();
+        println!("{}", line.join("  ").trim_end());
     }
 }
 

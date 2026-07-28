@@ -41,10 +41,6 @@ pub struct AtprotoConfig {
     pub exclude: Vec<String>,
 
     #[serde(default)]
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the atproto adapter will read the toggles")
-    )]
     pub bluesky: BlueskyToggles,
 }
 

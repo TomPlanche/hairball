@@ -6,7 +6,7 @@ The planned sources are ATProto (Bluesky, Tangled, standard.site), Gitea/Forgejo
 
 ## Status
 
-The project is at an early stage. The CLI loads and validates the config file. The `status` command lists the configured sources. The other commands return a "not implemented yet" error.
+The project is at an early stage. The CLI loads and validates the config file, then opens the SQLite database and runs the migrations. The `status` command lists the configured sources with their last run, row counts and cursor. The other commands return a "not implemented yet" error.
 
 ## Requirements
 
@@ -42,6 +42,18 @@ The CLI reads `config.toml` in the current directory. Use `--config <path>` to r
 2. Edit the sections of the sources you use. Remove the other sections.
 
 The CLI validates the config at startup. It reports all the errors at once, with the TOML path of each error. Git ignores `config.toml`.
+
+## Database
+
+The CLI stores all data in one SQLite file: `database` in the config (default: `hairball.db`). The CLI creates the file if it does not exist, and applies the migrations of `migrations/` at each start. A backup is a copy of the file. Git ignores `*.db` files.
+
+The database has 3 tables:
+
+- `events`: one row per record, for the sources that give single events (ATProto, Last.fm, bookmarks).
+- `daily_counts`: one count per day, for the sources that give only aggregates (GitHub, Gitea).
+- `sync_state`: the cursor and the last run of each source.
+
+All times are unix seconds, UTC.
 
 ## Secrets
 
@@ -79,6 +91,14 @@ cargo run -- --help
 cargo run -- --config config.example.toml status
 ```
 
-This command must list 6 sources: `atproto`, `bsky_bookmarks` (disabled), `gitea:codeberg`, `gitea:forge-perso` (skipped, mirror), `github` and `lastfm`.
+This command creates `hairball.db` in the current directory. It must list 6 sources: `atproto`, `bsky_bookmarks` (disabled), `gitea:codeberg`, `gitea:forge-perso` (skipped, mirror), `github` and `lastfm`. Each source shows `never` as last run and `0` rows.
+
+To see the stats change, add rows by hand, then run `status` again:
+
+```bash
+sqlite3 hairball.db "INSERT INTO daily_counts VALUES ('github', '2026-07-20', 3); INSERT INTO sync_state VALUES ('github', '2026', 1753450000);"
+```
+
+The `github` line must then show `2025-07-25T13:26:40Z`, `1` day and the cursor `2026`. Delete `hairball.db` after the test.
 
 To see the validation, put a bad value in a copy of the config, for example `timezone = ""`. The command must then print the error with its TOML path and exit with code 1.
