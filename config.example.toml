@@ -5,6 +5,7 @@
 timezone = "Europe/Paris"
 database = "hairball.db"
 
+# ATProto: no credentials. The CLI reads the public records of the repo.
 [atproto]
 handle = "tomplanche.com"           # or a DID
 exclude = ["app.bsky.graph.follow"] # NSIDs or NSID prefixes to ignore
@@ -14,11 +15,19 @@ posts = true      # app.bsky.feed.post
 likes = true      # app.bsky.feed.like
 reposts = false   # app.bsky.feed.repost
 
+# Bluesky bookmarks are private: they need an app password.
+# Create one in Bluesky: Settings > Privacy and security > App passwords.
+# - Never use the main account password.
+# - Do not allow access to direct messages: the CLI does not need it.
+# An app password has no read-only mode: it can also post. Keep it secret,
+# and revoke it in the same screen if it leaks.
 [bsky_bookmarks]
 enabled = false
 identifier = "tomplanche.com"
 app_password_env = "BSKY_APP_PASSWORD"
 
+# Gitea, Forgejo, Codeberg: no token, on purpose. With a token, older Gitea
+# versions add private activity to the heatmap. The CLI sends anonymous calls.
 [[gitea]]
 name = "codeberg"
 url = "https://codeberg.org"
@@ -30,10 +39,25 @@ url = "https://git.example.com"
 user = "tom"
 mirror = true                       # skipped: mirrors Tangled
 
+# GitHub: the GraphQL API needs a token, even for public data.
+# Create a fine-grained token: Settings > Developer settings > Personal access
+# tokens > Fine-grained tokens.
+# - Repository access: "Public repositories" (read-only).
+# - Permissions: none. Do not add any account or repository permission.
+# - Expiration: set one (for example 1 year), and renew the token.
+# A classic token also works: tick no scope at all.
+# The calendar includes private contributions only if the profile setting
+# "Include private contributions on my profile" is on. The CLI then stores
+# only the total per day, never the repository names.
 [github]
 user = "TomPlanche"
 token_env = "GITHUB_TOKEN"
 
+# Last.fm: an API key, no account login. Create an API account at
+# https://www.last.fm/api/account/create. The CLI uses only the API key,
+# not the shared secret: it calls read-only methods (user.getRecentTracks).
+# If "Hide recent listening information" is on in the Last.fm privacy
+# settings, the API refuses to return the scrobbles.
 [lastfm]
 user = "CHANGE_ME"
 api_key_env = "LASTFM_API_KEY"
