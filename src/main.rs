@@ -2,7 +2,11 @@ use std::path::PathBuf;
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
-use hairball::{config::Config, db};
+use hairball::{
+    check::{self, Endpoints, Status},
+    config::Config,
+    db, http,
+};
 use jiff::Timestamp;
 use sqlx::SqlitePool;
 
@@ -45,6 +49,9 @@ enum Command {
     /// Show each source: last run, cursor and row counts.
     Status,
 
+    /// Check that the secrets are set, valid and accepted by each API.
+    Check,
+
     /// Delete all rows of one kind (manual cleanup).
     Purge {
         /// The kind to delete (for example `app.bsky.feed.like`).
@@ -53,9 +60,31 @@ enum Command {
     },
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+fn main() -> anyhow::Result<()> {
+    // Load `.env` before the runtime starts: setting environment variables is
+    // only safe while the process has a single thread.
+    load_dotenv()?;
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("cannot start the async runtime")?
+        .block_on(run(Cli::parse()))
+}
+
+/// Reads `.env` (in the current directory or a parent), if it exists.
+///
+/// A variable that is already set keeps its value: systemd's `EnvironmentFile`
+/// and the shell win over `.env`.
+fn load_dotenv() -> anyhow::Result<()> {
+    match dotenvy::dotenv() {
+        Ok(_) => Ok(()),
+        Err(error) if error.not_found() => Ok(()),
+        Err(error) => Err(error).context("cannot read the .env file"),
+    }
+}
+
+async fn run(cli: Cli) -> anyhow::Result<()> {
     let config = Config::load(&cli.config)
         .with_context(|| format!("cannot load the config file {}", cli.config.display()))?;
 
@@ -70,8 +99,39 @@ async fn main() -> anyhow::Result<()> {
             let db = open_db(&config).await?;
             status(&config, &db).await
         }
+        Command::Check => check(&config).await,
         Command::Purge { kind } => bail!("`purge` is not implemented yet (kind: {kind})"),
     }
+}
+
+/// Runs the credential checks and fails if one of them fails.
+async fn check(config: &Config) -> anyhow::Result<()> {
+    let client = http::client().context("cannot build the HTTP client")?;
+    let env = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    };
+    let checks = check::run(config, env, &client, &Endpoints::default()).await;
+
+    if checks.is_empty() {
+        println!("no source with a secret is configured");
+        return Ok(());
+    }
+
+    let mut rows = vec![["SOURCE", "RESULT", "DETAIL"].map(str::to_owned)];
+    rows.extend(
+        checks
+            .iter()
+            .map(|c| [c.source.to_owned(), c.status.to_string(), c.detail.clone()]),
+    );
+    print_table(&rows);
+
+    let failed = checks.iter().filter(|c| c.status == Status::Failed).count();
+    if failed > 0 {
+        bail!("{failed} check(s) failed");
+    }
+    Ok(())
 }
 
 async fn open_db(config: &Config) -> anyhow::Result<SqlitePool> {
