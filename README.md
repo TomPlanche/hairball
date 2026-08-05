@@ -56,6 +56,18 @@ The database has 3 tables:
 
 All times are unix seconds, UTC.
 
+## Time
+
+The database stores UTC times only. The CLI groups the events into days only at export time, in the time zone of `timezone` in the config (an IANA name, default: `Europe/Paris`). For example, 23:30 UTC on 15 January is 16 January in Paris. The CLI reads the time zone from the system time zone database: the server needs the `tzdata` package.
+
+The `createdAt` field of an ATProto record comes from the client: it can be wrong or backdated. The CLI chooses the time of an event in this order:
+
+1. `createdAt`.
+2. The time in the record key, if the key is a TID (Timestamp IDentifier: 13 characters, with the creation time in microseconds).
+3. The first time the CLI saw the record.
+
+The CLI refuses a time before 2022-01-01, or more than 1 day in the future, and then uses the next choice. The `daily_counts` days come already grouped by each source: the CLI keeps them as they are.
+
 ## Secrets
 
 The CLI reads secrets from environment variables only. The config file holds the variable names, never the values. This keeps the config free of secrets: you can show it, copy it or back it up without risk, and you can renew a secret without a change to the config.
@@ -134,7 +146,13 @@ sqlite3 hairball.db "INSERT INTO daily_counts VALUES ('github', '2026-07-20', 3)
 
 The `github` line must then show `2025-07-25T13:26:40Z`, `1` day and the cursor `2026`. Delete `hairball.db` after the test.
 
-To see the validation, put a bad value in a copy of the config, for example `timezone = ""`. The command must then print the error with its TOML path and exit with code 1.
+To see the validation, put a bad value in a copy of the config, for example `timezone = "Europe/Atlantis"`. The command must then print the error with its TOML path (`timezone: ... is not a known time zone`) and exit with code 1.
+
+The time helpers (TID decoding, choice of the event time, days in a time zone) have no command yet. Their unit tests use a real TID of a Bluesky post and the ATProto specification example:
+
+```bash
+cargo test time::
+```
 
 The unit tests of `check` use a mock server (wiremock): they never call the real APIs. To test the real secrets, export them (see "Secrets"), then run:
 

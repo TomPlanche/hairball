@@ -6,15 +6,20 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use jiff::tz::TimeZone;
 use serde::Deserialize;
 
 /// The full configuration file.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// Time zone for the day buckets of the export.
+    /// Time zone for the day buckets of the export: an IANA name.
     #[serde(default = "default_timezone")]
     pub timezone: String,
+
+    /// The time zone of `timezone`, found by [`Config::parse`].
+    #[serde(skip, default = "utc")]
+    pub time_zone: TimeZone,
 
     /// Path to the SQLite database file.
     #[serde(default = "default_database")]
@@ -177,20 +182,23 @@ impl Config {
 
     /// Parses and validates a config from TOML text.
     pub fn parse(text: &str) -> Result<Self, ConfigError> {
-        let config: Self = toml::from_str(text)?;
-        let issues = config.validate();
-        if issues.is_empty() {
+        let mut config: Self = toml::from_str(text)?;
+        let mut v = Validator::default();
+        // On an error, the issue is recorded and `parse` fails below: UTC is never used.
+        config.time_zone = v
+            .time_zone("timezone", &config.timezone)
+            .unwrap_or(TimeZone::UTC);
+        config.validate(&mut v);
+
+        if v.issues.is_empty() {
             Ok(config)
         } else {
-            Err(ConfigError::Invalid(Issues(issues)))
+            Err(ConfigError::Invalid(Issues(v.issues)))
         }
     }
 
-    /// Returns all validation errors at once. An empty list means a valid config.
-    fn validate(&self) -> Vec<Issue> {
-        let mut v = Validator::default();
-
-        v.non_empty("timezone", &self.timezone);
+    /// Records all validation errors at once in `v`.
+    fn validate(&self, v: &mut Validator) {
         v.non_empty("database", &self.database.to_string_lossy());
 
         if let Some(atproto) = &self.atproto {
@@ -248,8 +256,6 @@ impl Config {
             v.non_empty("lastfm.user", &lastfm.user);
             v.env_var_name("lastfm.api_key_env", &lastfm.api_key_env);
         }
-
-        v.issues
     }
 
     /// Lists the sources declared in the config, in a stable order.
@@ -295,6 +301,10 @@ fn default_database() -> PathBuf {
     PathBuf::from("hairball.db")
 }
 
+fn utc() -> TimeZone {
+    TimeZone::UTC
+}
+
 /// Collects validation errors.
 #[derive(Default)]
 struct Validator {
@@ -321,6 +331,26 @@ impl Validator {
                 path,
                 format!("`{value}` is not a valid environment variable name"),
             );
+        }
+    }
+
+    /// Finds the time zone `name` in the system time zone database.
+    fn time_zone(&mut self, path: &str, name: &str) -> Option<TimeZone> {
+        if name.trim().is_empty() {
+            self.push(path, "must not be empty");
+            return None;
+        }
+        match TimeZone::get(name) {
+            Ok(tz) => Some(tz),
+            Err(_) => {
+                self.push(
+                    path,
+                    format!(
+                        "`{name}` is not a known time zone (use an IANA name, for example `Europe/Paris`)"
+                    ),
+                );
+                None
+            }
         }
     }
 }
@@ -369,8 +399,34 @@ mod tests {
         let config = Config::parse("").unwrap();
 
         assert_eq!(config.timezone, "Europe/Paris");
+        assert_eq!(config.time_zone.iana_name(), Some("Europe/Paris"));
         assert_eq!(config.database, PathBuf::from("hairball.db"));
         assert!(config.sources().is_empty());
+    }
+
+    #[test]
+    fn time_zone_is_found_by_name() {
+        let config = Config::parse("timezone = \"America/New_York\"").unwrap();
+
+        assert_eq!(config.time_zone.iana_name(), Some("America/New_York"));
+    }
+
+    #[test]
+    fn unknown_time_zone_is_rejected() {
+        assert_eq!(
+            issues("timezone = \"Europe/Atlantis\""),
+            [
+                "timezone: `Europe/Atlantis` is not a known time zone (use an IANA name, for example `Europe/Paris`)"
+            ]
+        );
+    }
+
+    #[test]
+    fn time_zone_cannot_be_set_directly() {
+        // `time_zone` is computed: the TOML file cannot set it.
+        let error = Config::parse("time_zone = \"UTC\"");
+
+        assert!(matches!(error, Err(ConfigError::Parse(_))));
     }
 
     #[test]
