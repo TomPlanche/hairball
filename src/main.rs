@@ -6,9 +6,12 @@ use hairball::{
     check::{self, Endpoints, Status},
     config::Config,
     db, http,
+    sources::{self, Planned, SyncContext},
 };
 use jiff::Timestamp;
 use sqlx::SqlitePool;
+use tracing::{error, info};
+use tracing_subscriber::EnvFilter;
 
 /// Collect my public activity from many platforms into one SQLite file.
 #[derive(Debug, Parser)]
@@ -64,6 +67,7 @@ fn main() -> anyhow::Result<()> {
     // Load `.env` before the runtime starts: setting environment variables is
     // only safe while the process has a single thread.
     load_dotenv()?;
+    init_logs();
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -84,13 +88,24 @@ fn load_dotenv() -> anyhow::Result<()> {
     }
 }
 
+/// Logs go to stderr, so that `export` can write JSON to stdout.
+/// `RUST_LOG` sets the level (default: `info`), for example `RUST_LOG=hairball=debug`.
+fn init_logs() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
+}
+
 async fn run(cli: Cli) -> anyhow::Result<()> {
     let config = Config::load(&cli.config)
         .with_context(|| format!("cannot load the config file {}", cli.config.display()))?;
 
     match cli.command {
         Command::Sync { source, full } => {
-            bail!("`sync` is not implemented yet (source: {source:?}, full: {full})")
+            let db = open_db(&config).await?;
+            sync(&config, &db, source.as_deref(), full).await
         }
         Command::Export { year, out } => {
             bail!("`export` is not implemented yet (year: {year:?}, out: {out:?})")
@@ -102,6 +117,70 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Check => check(&config).await,
         Command::Purge { kind } => bail!("`purge` is not implemented yet (kind: {kind})"),
     }
+}
+
+/// Runs each planned source, or only `only`. One failing source does not stop
+/// the others: the command fails at the end.
+async fn sync(
+    config: &Config,
+    db: &SqlitePool,
+    only: Option<&str>,
+    full: bool,
+) -> anyhow::Result<()> {
+    let mut planned = sources::plan(config);
+    if let Some(only) = only {
+        let ids: Vec<_> = planned.iter().map(Planned::id).collect();
+        if !ids.iter().any(|id| id == only) {
+            bail!(
+                "unknown source `{only}`: the configured sources are {}",
+                ids.join(", ")
+            );
+        }
+        planned.retain(|p| p.id() == only);
+    }
+
+    let client = http::client().context("cannot build the HTTP client")?;
+    let ctx = SyncContext {
+        db,
+        client: &client,
+        now: Timestamp::now(),
+        full,
+    };
+
+    let mut failed = Vec::new();
+    for planned in &planned {
+        match planned {
+            Planned::Skip { id, reason } => info!(source = %id, "skipped: {reason}"),
+            Planned::Run(source) => {
+                let id = source.id();
+                info!(source = %id, full, "sync started");
+                match source.sync(&ctx).await {
+                    Ok(report) => info!(source = %id, "sync done: {report}"),
+                    Err(e) => {
+                        error!(source = %id, "sync failed: {}", error_chain(&e));
+                        failed.push(id);
+                    }
+                }
+            }
+        }
+    }
+
+    if !failed.is_empty() {
+        bail!("the sync failed for: {}", failed.join(", "));
+    }
+    Ok(())
+}
+
+/// Joins an error and all its sources: `a: b: c`.
+fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
 }
 
 /// Runs the credential checks and fails if one of them fails.

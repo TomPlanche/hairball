@@ -35,7 +35,7 @@ pub struct Config {
     pub lastfm: Option<LastfmConfig>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AtprotoConfig {
     /// A handle (`example.com`) or a DID.
@@ -50,7 +50,7 @@ pub struct AtprotoConfig {
 }
 
 /// Fine-grained toggles for the `app.bsky.*` collections.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct BlueskyToggles {
     /// `app.bsky.feed.post`

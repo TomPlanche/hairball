@@ -6,7 +6,22 @@ The planned sources are ATProto (Bluesky, Tangled, standard.site), Gitea/Forgejo
 
 ## Status
 
-The project is at an early stage. The CLI loads and validates the config file, then opens the SQLite database and runs the migrations. The `status` command lists the configured sources with their last run, row counts and cursor. The other commands return a "not implemented yet" error.
+The project is at an early stage.
+
+- `sync` works for the ATProto source: it reads all the records of the repo and stores one event per record. It reads all the pages at each run: the incremental mode, the deletions and the purge of disabled kinds come later. The other sources are skipped with a log line.
+- `status` lists the configured sources with their last run, row counts and cursor.
+- `check` tests the secrets and the ATProto identity against the real APIs.
+- `export` and `purge` return a "not implemented yet" error.
+
+## Logs
+
+The CLI writes its logs to stderr. Set the level with `RUST_LOG` (default: `info`):
+
+```bash
+RUST_LOG=hairball=debug cargo run -- sync
+```
+
+With `debug`, the ATProto adapter logs each collection it reads or skips. A rejected event time (for example a `createdAt` in the future) is a warning, with the URI of the record.
 
 ## Requirements
 
@@ -148,10 +163,24 @@ The `github` line must then show `2025-07-25T13:26:40Z`, `1` day and the cursor 
 
 To see the validation, put a bad value in a copy of the config, for example `timezone = "Europe/Atlantis"`. The command must then print the error with its TOML path (`timezone: ... is not a known time zone`) and exit with code 1.
 
-The time helpers (TID decoding, choice of the event time, days in a time zone) have no command yet. Their unit tests use a real TID of a Bluesky post and the ATProto specification example:
+The unit tests of the time helpers (TID decoding, choice of the event time, days in a time zone) use a real TID of a Bluesky post and the ATProto specification example:
 
 ```bash
 cargo test time::
+```
+
+The unit tests of the ATProto adapter use a mock PDS. To fill a database with your real records, set your handle in `[atproto]`, then run:
+
+```bash
+cargo run --release -- sync --source atproto
+```
+
+The last log line must show `sync done: N inserted`. Then `status` must show the same number of events on the `atproto` line, and a last run. Run `sync` a second time: the log must show `0 inserted, 0 updated, N unchanged`. For a repo of about 50 000 records, a run takes about 2 to 3 minutes.
+
+An unknown source id must stop the command with the list of the configured sources:
+
+```bash
+cargo run -- sync --source nope
 ```
 
 The unit tests of `check` use a mock server (wiremock): they never call the real APIs. To test the real secrets, export them (see "Secrets"), then run:

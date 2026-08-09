@@ -120,6 +120,9 @@ pub struct EventTime {
 ///
 /// A candidate is rejected if it cannot be read, if it is before
 /// [`MIN_EVENT_TIME`], or if it is more than 1 day after `now`.
+///
+/// A record key that is not a TID (`self`, a custom key) is normal: it is not
+/// a candidate, and not a rejection.
 pub fn event_time(
     created_at: Option<&str>,
     record_key: Option<&str>,
@@ -133,7 +136,7 @@ pub fn event_time(
         ),
         (
             TimeSource::RecordKey,
-            record_key.map(|key| decode_tid(key).map_err(|e| e.to_string())),
+            record_key.and_then(|key| decode_tid(key).ok()).map(Ok),
         ),
     ];
 
@@ -285,9 +288,23 @@ mod tests {
 
         assert_eq!(time.at, first_seen);
         assert_eq!(time.source, TimeSource::FirstSeen);
+        // Only `createdAt` is a rejection: a key that is not a TID is normal.
         assert_eq!(
             time.rejected.iter().map(|r| r.source).collect::<Vec<_>>(),
-            [TimeSource::CreatedAt, TimeSource::RecordKey]
+            [TimeSource::CreatedAt]
+        );
+    }
+
+    #[test]
+    fn tid_out_of_range_is_a_rejection() {
+        let first_seen = ts("2026-11-01T08:00:00Z");
+        // A valid TID with the time 0 (1970).
+        let time = event_time(None, Some("2222222222222"), first_seen, ts(NOW));
+
+        assert_eq!(time.source, TimeSource::FirstSeen);
+        assert_eq!(
+            time.rejected[0].reason,
+            Reason::TooOld(Timestamp::UNIX_EPOCH)
         );
     }
 

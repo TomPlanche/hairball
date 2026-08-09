@@ -181,6 +181,21 @@ pub async fn upsert_daily_count(
     })
 }
 
+/// Reads the `first_seen` time of an event, if the event is already stored.
+pub async fn event_first_seen(
+    db: &SqlitePool,
+    source: &str,
+    external_id: &str,
+) -> Result<Option<i64>, DbError> {
+    Ok(
+        sqlx::query_scalar("SELECT first_seen FROM events WHERE source = ?1 AND external_id = ?2")
+            .bind(source)
+            .bind(external_id)
+            .fetch_optional(db)
+            .await?,
+    )
+}
+
 /// Reads the stored state of a source. A source that never ran has the default state.
 pub async fn sync_state(db: &SqlitePool, source: &str) -> Result<SyncState, DbError> {
     let row: Option<(Option<String>, Option<i64>)> =

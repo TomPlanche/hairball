@@ -5,4 +5,5 @@ pub mod config;
 pub mod db;
 pub mod http;
 pub mod identity;
+pub mod sources;
 pub mod time;
