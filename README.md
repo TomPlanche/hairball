@@ -81,7 +81,7 @@ The `createdAt` field of an ATProto record comes from the client: it can be wron
 2. The time in the record key, if the key is a TID (Timestamp IDentifier: 13 characters, with the creation time in microseconds).
 3. The first time the CLI saw the record.
 
-The CLI refuses a time before 2022-01-01, or more than 1 day in the future, and then uses the next choice. The `daily_counts` days come already grouped by each source: the CLI keeps them as they are.
+The CLI refuses a time before `oldest_date` of `[atproto]` (default: `2000-01-01`), or more than 1 day in the future, and then uses the next choice. ATProto started in 2022, but an app can import older data with its real date: for example Rocksky imports a scrobble history with the date of each listen. A limit of 2022 would move all these records to the day of the import. The `daily_counts` days come already grouped by each source: the CLI keeps them as they are.
 
 ## Secrets
 

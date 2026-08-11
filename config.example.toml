@@ -9,6 +9,10 @@ database = "hairball.db"
 [atproto]
 handle = "tomplanche.com"           # or a DID
 exclude = ["app.bsky.graph.follow"] # NSIDs or NSID prefixes to ignore
+# An older `createdAt` is rejected (the record time then comes from its key).
+# ATProto started in 2022, but apps can import older data with its real
+# date, for example a scrobble history.
+oldest_date = "2000-01-01"
 
 [atproto.bluesky]                   # fine-grained toggles for app.bsky.*
 posts = true      # app.bsky.feed.post

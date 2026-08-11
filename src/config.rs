@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use jiff::tz::TimeZone;
+use jiff::{Timestamp, civil::Date, tz::TimeZone};
 use serde::Deserialize;
 
 /// The full configuration file.
@@ -47,6 +47,19 @@ pub struct AtprotoConfig {
 
     #[serde(default)]
     pub bluesky: BlueskyToggles,
+
+    /// The oldest accepted record date (`YYYY-MM-DD`, UTC). An older
+    /// `createdAt` is rejected, and the record time comes from its key.
+    #[serde(default = "default_oldest_date")]
+    pub oldest_date: String,
+}
+
+impl AtprotoConfig {
+    /// `oldest_date` as a time (midnight UTC), or `None` if it is not a date.
+    pub fn oldest_time(&self) -> Option<Timestamp> {
+        let date: Date = self.oldest_date.trim().parse().ok()?;
+        date.to_zoned(TimeZone::UTC).ok().map(|z| z.timestamp())
+    }
 }
 
 /// Fine-grained toggles for the `app.bsky.*` collections.
@@ -206,6 +219,12 @@ impl Config {
             for (i, nsid) in atproto.exclude.iter().enumerate() {
                 v.non_empty(&format!("atproto.exclude[{i}]"), nsid);
             }
+            if atproto.oldest_time().is_none() {
+                v.push(
+                    "atproto.oldest_date",
+                    format!("`{}` is not a date (YYYY-MM-DD)", atproto.oldest_date),
+                );
+            }
         }
 
         if let Some(bookmarks) = &self.bsky_bookmarks
@@ -303,6 +322,10 @@ fn default_database() -> PathBuf {
 
 fn utc() -> TimeZone {
     TimeZone::UTC
+}
+
+fn default_oldest_date() -> String {
+    "2000-01-01".to_owned()
 }
 
 /// Collects validation errors.
@@ -435,6 +458,36 @@ mod tests {
         let toggles = config.atproto.unwrap().bluesky;
 
         assert!(toggles.posts && toggles.likes && toggles.reposts);
+    }
+
+    #[test]
+    fn oldest_date_defaults_to_2000() {
+        let config = Config::parse("[atproto]\nhandle = \"example.com\"").unwrap();
+
+        assert_eq!(
+            config.atproto.unwrap().oldest_time(),
+            Some("2000-01-01T00:00:00Z".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn oldest_date_can_be_changed() {
+        let config =
+            Config::parse("[atproto]\nhandle = \"example.com\"\noldest_date = \"2022-01-01\"")
+                .unwrap();
+
+        assert_eq!(
+            config.atproto.unwrap().oldest_time(),
+            Some("2022-01-01T00:00:00Z".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn bad_oldest_date_is_rejected() {
+        assert_eq!(
+            issues("[atproto]\nhandle = \"example.com\"\noldest_date = \"2022-13-01\""),
+            ["atproto.oldest_date: `2022-13-01` is not a date (YYYY-MM-DD)"]
+        );
     }
 
     #[test]

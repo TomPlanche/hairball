@@ -28,6 +28,8 @@ pub struct Atproto {
     handle: String,
     exclude: Vec<String>,
     bluesky: BlueskyToggles,
+    /// An older `createdAt` is rejected.
+    oldest: Timestamp,
     endpoints: IdentityEndpoints,
 }
 
@@ -59,6 +61,10 @@ impl Atproto {
             handle: config.handle.clone(),
             exclude: config.exclude.clone(),
             bluesky: config.bluesky.clone(),
+            // `Config::parse` already refused a bad date: the default is never used then.
+            oldest: config
+                .oldest_time()
+                .unwrap_or(time::DEFAULT_OLDEST_EVENT_TIME),
             endpoints: IdentityEndpoints::default(),
         }
     }
@@ -140,7 +146,7 @@ impl Atproto {
             let page: RecordPage = xrpc_get(ctx.client, &url, &query).await?;
 
             for record in &page.records {
-                let upsert = upsert_record(ctx, nsid, record).await?;
+                let upsert = upsert_record(ctx, nsid, record, self.oldest).await?;
                 report.count(upsert);
             }
 
@@ -157,6 +163,7 @@ async fn upsert_record(
     ctx: &SyncContext<'_>,
     nsid: &str,
     record: &Record,
+    oldest: Timestamp,
 ) -> Result<db::Upsert, SourceError> {
     let record_key = record.uri.rsplit('/').next();
     let created_at = record.value.get("createdAt").and_then(Value::as_str);
@@ -167,7 +174,7 @@ async fn upsert_record(
         .and_then(|seconds| Timestamp::from_second(seconds).ok())
         .unwrap_or(ctx.now);
 
-    let event_time = time::event_time(created_at, record_key, first_seen, ctx.now);
+    let event_time = time::event_time(created_at, record_key, first_seen, ctx.now, oldest);
     for rejected in &event_time.rejected {
         warn!(uri = %record.uri, "{rejected}");
     }

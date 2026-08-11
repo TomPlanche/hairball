@@ -10,9 +10,11 @@ use jiff::{Timestamp, civil::Date, tz::TimeZone};
 /// Base32-sortable alphabet of the TIDs.
 const TID_ALPHABET: &[u8; 32] = b"234567abcdefghijklmnopqrstuvwxyz";
 
-/// The oldest accepted event time (2022-01-01T00:00:00Z): ATProto records
-/// did not exist before.
-pub const MIN_EVENT_TIME: Timestamp = Timestamp::constant(1_640_995_200, 0);
+/// The default oldest accepted event time: 2000-01-01T00:00:00Z.
+///
+/// ATProto started in 2022, but an app can import older data with its real
+/// date (for example a scrobble history). The config can change this limit.
+pub const DEFAULT_OLDEST_EVENT_TIME: Timestamp = Timestamp::constant(946_684_800, 0);
 
 /// An event time can be this far in the future (clock drift between servers).
 const MAX_AHEAD_SECONDS: i64 = 24 * 60 * 60;
@@ -86,7 +88,7 @@ impl fmt::Display for TimeSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reason {
     Invalid(String),
-    TooOld(Timestamp),
+    TooOld { at: Timestamp, oldest: Timestamp },
     InFuture(Timestamp),
 }
 
@@ -101,7 +103,9 @@ impl fmt::Display for Rejected {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.reason {
             Reason::Invalid(error) => write!(f, "{} is invalid: {error}", self.source),
-            Reason::TooOld(at) => write!(f, "{} {at} is before {MIN_EVENT_TIME}", self.source),
+            Reason::TooOld { at, oldest } => {
+                write!(f, "{} {at} is before {oldest}", self.source)
+            }
             Reason::InFuture(at) => write!(f, "{} {at} is in the future", self.source),
         }
     }
@@ -118,8 +122,8 @@ pub struct EventTime {
 /// Chooses the time of an event: `createdAt`, then the record key if it is a
 /// TID, then `first_seen`.
 ///
-/// A candidate is rejected if it cannot be read, if it is before
-/// [`MIN_EVENT_TIME`], or if it is more than 1 day after `now`.
+/// A candidate is rejected if it cannot be read, if it is before `oldest`,
+/// or if it is more than 1 day after `now`.
 ///
 /// A record key that is not a TID (`self`, a custom key) is normal: it is not
 /// a candidate, and not a rejection.
@@ -128,6 +132,7 @@ pub fn event_time(
     record_key: Option<&str>,
     first_seen: Timestamp,
     now: Timestamp,
+    oldest: Timestamp,
 ) -> EventTime {
     let candidates = [
         (
@@ -145,7 +150,7 @@ pub fn event_time(
         let reason = match candidate {
             None => continue,
             Some(Err(error)) => Reason::Invalid(error),
-            Some(Ok(at)) if at < MIN_EVENT_TIME => Reason::TooOld(at),
+            Some(Ok(at)) if at < oldest => Reason::TooOld { at, oldest },
             Some(Ok(at)) if at.as_second() > now.as_second() + MAX_AHEAD_SECONDS => {
                 Reason::InFuture(at)
             }
@@ -214,9 +219,24 @@ mod tests {
         assert_eq!(decode_tid("kzzzzzzzzzzzz"), Err(TidError::FirstCharacter));
     }
 
+    /// `event_time` with `now` = [`NOW`] and the default oldest time.
+    fn pick(
+        created_at: Option<&str>,
+        record_key: Option<&str>,
+        first_seen: Timestamp,
+    ) -> EventTime {
+        event_time(
+            created_at,
+            record_key,
+            first_seen,
+            ts(NOW),
+            DEFAULT_OLDEST_EVENT_TIME,
+        )
+    }
+
     #[test]
     fn valid_created_at_wins() {
-        let time = event_time(Some(REAL_CREATED_AT), Some(REAL_TID), ts(NOW), ts(NOW));
+        let time = pick(Some(REAL_CREATED_AT), Some(REAL_TID), ts(NOW));
 
         assert_eq!(time.at, ts(REAL_CREATED_AT));
         assert_eq!(time.source, TimeSource::CreatedAt);
@@ -225,14 +245,14 @@ mod tests {
 
     #[test]
     fn created_at_with_an_offset_is_read() {
-        let time = event_time(Some("2026-09-13T21:40:12+02:00"), None, ts(NOW), ts(NOW));
+        let time = pick(Some("2026-09-13T21:40:12+02:00"), None, ts(NOW));
 
         assert_eq!(time.at, ts("2026-09-13T19:40:12Z"));
     }
 
     #[test]
     fn bad_created_at_falls_back_to_the_tid() {
-        let time = event_time(Some("yesterday"), Some(REAL_TID), ts(NOW), ts(NOW));
+        let time = pick(Some("yesterday"), Some(REAL_TID), ts(NOW));
 
         assert_eq!(time.source, TimeSource::RecordKey);
         assert_eq!(time.at, ts("2026-09-13T19:40:12.212Z"));
@@ -243,12 +263,7 @@ mod tests {
 
     #[test]
     fn future_created_at_falls_back_to_the_tid() {
-        let time = event_time(
-            Some("2030-01-01T00:00:00Z"),
-            Some(REAL_TID),
-            ts(NOW),
-            ts(NOW),
-        );
+        let time = pick(Some("2030-01-01T00:00:00Z"), Some(REAL_TID), ts(NOW));
 
         assert_eq!(time.source, TimeSource::RecordKey);
         assert_eq!(
@@ -259,24 +274,35 @@ mod tests {
 
     #[test]
     fn up_to_one_day_ahead_is_accepted() {
-        let time = event_time(Some("2026-11-13T11:59:59Z"), None, ts(NOW), ts(NOW));
+        let time = pick(Some("2026-11-13T11:59:59Z"), None, ts(NOW));
 
         assert_eq!(time.source, TimeSource::CreatedAt);
     }
 
     #[test]
-    fn backdated_created_at_falls_back_to_the_tid() {
+    fn imported_data_older_than_atproto_keeps_its_date() {
+        // A scrobble of 2021, imported into an ATProto app in 2026.
+        let time = pick(Some("2021-12-30T15:46:10Z"), Some(REAL_TID), ts(NOW));
+
+        assert_eq!(time.source, TimeSource::CreatedAt);
+        assert_eq!(time.at, ts("2021-12-30T15:46:10Z"));
+    }
+
+    #[test]
+    fn created_at_before_the_oldest_time_falls_back_to_the_tid() {
+        let oldest = ts("2022-01-01T00:00:00Z");
         let time = event_time(
-            Some("2001-09-11T00:00:00Z"),
+            Some("2021-12-30T15:46:10Z"),
             Some(REAL_TID),
             ts(NOW),
             ts(NOW),
+            oldest,
         );
 
         assert_eq!(time.source, TimeSource::RecordKey);
         assert_eq!(
-            time.rejected[0].reason,
-            Reason::TooOld(ts("2001-09-11T00:00:00Z"))
+            time.rejected[0].to_string(),
+            "createdAt 2021-12-30T15:46:10Z is before 2022-01-01T00:00:00Z"
         );
     }
 
@@ -284,7 +310,7 @@ mod tests {
     fn no_valid_candidate_falls_back_to_first_seen() {
         let first_seen = ts("2026-11-01T08:00:00Z");
         // `self` is the record key of a profile: not a TID.
-        let time = event_time(Some("not a date"), Some("self"), first_seen, ts(NOW));
+        let time = pick(Some("not a date"), Some("self"), first_seen);
 
         assert_eq!(time.at, first_seen);
         assert_eq!(time.source, TimeSource::FirstSeen);
@@ -299,12 +325,15 @@ mod tests {
     fn tid_out_of_range_is_a_rejection() {
         let first_seen = ts("2026-11-01T08:00:00Z");
         // A valid TID with the time 0 (1970).
-        let time = event_time(None, Some("2222222222222"), first_seen, ts(NOW));
+        let time = pick(None, Some("2222222222222"), first_seen);
 
         assert_eq!(time.source, TimeSource::FirstSeen);
         assert_eq!(
             time.rejected[0].reason,
-            Reason::TooOld(Timestamp::UNIX_EPOCH)
+            Reason::TooOld {
+                at: Timestamp::UNIX_EPOCH,
+                oldest: DEFAULT_OLDEST_EVENT_TIME,
+            }
         );
     }
 
