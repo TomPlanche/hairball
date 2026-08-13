@@ -8,7 +8,7 @@ The planned sources are ATProto (Bluesky, Tangled, standard.site), Gitea/Forgejo
 
 The project is at an early stage.
 
-- `sync` works for the ATProto source: it reads all the records of the repo and stores one event per record. It reads all the pages at each run: the incremental mode, the deletions and the purge of disabled kinds come later. The other sources are skipped with a log line.
+- `sync` works for the ATProto source: it reads the records of the repo and stores one event per record (see "Sync"). The deletions and the purge of disabled kinds come later. The other sources are skipped with a log line.
 - `status` lists the configured sources with their last run, row counts and cursor.
 - `check` tests the secrets and the ATProto identity against the real APIs.
 - `export` and `purge` return a "not implemented yet" error.
@@ -70,6 +70,15 @@ The database has 3 tables:
 - `sync_state`: the cursor and the last run of each source.
 
 All times are unix seconds, UTC.
+
+## Sync
+
+`sync` has 2 modes:
+
+- **Incremental** (default, for the hourly run): `listRecords` returns the records of a collection by record key, newest first. Most record keys are TIDs, which sort by time. The CLI stops a collection after a page where all the records are already in the database: the next pages are older.
+- **Full** (`--full`, for the daily run): the CLI reads all the pages of all the collections.
+
+A record with a key that is not a TID (a custom key) can appear on any page. The incremental mode can miss it, and the next full run finds it.
 
 ## Time
 
@@ -175,7 +184,9 @@ The unit tests of the ATProto adapter use a mock PDS. To fill a database with yo
 cargo run --release -- sync --source atproto
 ```
 
-The last log line must show `sync done: N inserted`. Then `status` must show the same number of events on the `atproto` line, and a last run. Run `sync` a second time: the log must show `0 inserted, 0 updated, N unchanged`. For a repo of about 50 000 records, a run takes about 2 to 3 minutes.
+The last log line must show `sync done: N inserted`. Then `status` must show the same number of events on the `atproto` line, and a last run. For a repo of about 50 000 records, this first run takes about 2 minutes.
+
+Run `sync` a second time: it is incremental, so it must take a few seconds (about 10 s for 50 000 records), with `0 inserted` and only a small number of `unchanged` records. Then run `sync --full`: it must read everything again, with `0 inserted, 0 updated, N unchanged`. With `RUST_LOG=hairball=debug`, each collection logs `only known records: stop` or `last page`.
 
 An unknown source id must stop the command with the list of the configured sources:
 

@@ -126,7 +126,11 @@ impl Atproto {
         Ok(report)
     }
 
-    /// Reads all the pages of one collection, and upserts each record.
+    /// Reads the pages of one collection, and upserts each record.
+    ///
+    /// `listRecords` returns the records by record key, newest first (TIDs sort
+    /// by time). Without `--full`, the read stops after a page where all the
+    /// records are already known: the next pages are older.
     async fn sync_collection(
         &self,
         ctx: &SyncContext<'_>,
@@ -137,6 +141,7 @@ impl Atproto {
     ) -> Result<(), SourceError> {
         let url = format!("{pds}/xrpc/com.atproto.repo.listRecords");
         let mut cursor: Option<String> = None;
+        let mut pages = 0;
 
         loop {
             let mut query = vec![("repo", did), ("collection", nsid), ("limit", PAGE_SIZE)];
@@ -144,15 +149,25 @@ impl Atproto {
                 query.push(("cursor", cursor));
             }
             let page: RecordPage = xrpc_get(ctx.client, &url, &query).await?;
+            pages += 1;
 
+            let mut all_known = true;
             for record in &page.records {
                 let upsert = upsert_record(ctx, nsid, record, self.oldest).await?;
+                all_known &= upsert != db::Upsert::Inserted;
                 report.count(upsert);
             }
 
+            if !ctx.full && all_known && !page.records.is_empty() {
+                debug!(%nsid, pages, "only known records: stop");
+                return Ok(());
+            }
             match page.cursor {
                 Some(next) if !page.records.is_empty() => cursor = Some(next),
-                _ => return Ok(()),
+                _ => {
+                    debug!(%nsid, pages, "last page");
+                    return Ok(());
+                }
             }
         }
     }
@@ -304,17 +319,27 @@ mod tests {
         .await;
     }
 
+    /// An incremental sync (no `--full`).
     async fn sync_at(
         adapter: &Atproto,
         db: &SqlitePool,
         now: &str,
+    ) -> Result<SyncReport, SourceError> {
+        sync_with(adapter, db, now, false).await
+    }
+
+    async fn sync_with(
+        adapter: &Atproto,
+        db: &SqlitePool,
+        now: &str,
+        full: bool,
     ) -> Result<SyncReport, SourceError> {
         let client = http::client().unwrap();
         let ctx = SyncContext {
             db,
             client: &client,
             now: now.parse().unwrap(),
-            full: false,
+            full,
         };
         adapter.sync(&ctx).await
     }
@@ -465,8 +490,8 @@ mod tests {
             Some(seconds("2026-11-12T12:00:00Z"))
         );
 
-        // A second run changes nothing.
-        let report = sync_at(&adapter, &db, "2026-11-12T13:00:00Z")
+        // A second full run reads everything again, and changes nothing.
+        let report = sync_with(&adapter, &db, "2026-11-12T13:00:00Z", true)
             .await
             .unwrap();
         assert_eq!(
@@ -528,5 +553,106 @@ mod tests {
         );
         // A failed run does not store a last run.
         assert_eq!(db::sync_state(&db, SOURCE).await.unwrap().last_run, None);
+    }
+
+    const POST: &str = "app.bsky.feed.post";
+
+    /// 2 pages of posts, newest first. The second page must be requested
+    /// `second_page_reads` times during the test.
+    async fn mount_two_pages(server: &MockServer, second_page_reads: u64) {
+        mount_account(server, &[POST]).await;
+        mount_page(
+            server,
+            POST,
+            None,
+            vec![
+                record(
+                    POST,
+                    "3mvgdyaeyt22l",
+                    json!({ "createdAt": "2026-09-13T19:40:12Z" }),
+                ),
+                record(
+                    POST,
+                    "3mu2lu2t2xi2o",
+                    json!({ "createdAt": "2026-08-27T10:03:53Z" }),
+                ),
+            ],
+            Some("page-2"),
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path(LIST))
+            .and(query_param("collection", POST))
+            .and(query_param("cursor", "page-2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "records": [record(POST, "3jzfcijpj2z2a", json!({ "createdAt": "2023-06-30T15:03:01Z" }))]
+            })))
+            .expect(second_page_reads)
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn incremental_sync_stops_at_a_page_of_known_records() {
+        let server = MockServer::start().await;
+        // Read by the first sync only.
+        mount_two_pages(&server, 1).await;
+        let db = db::open_in_memory().await.unwrap();
+        let adapter = adapter(&server, "");
+
+        let first = sync_at(&adapter, &db, "2026-11-12T12:00:00Z")
+            .await
+            .unwrap();
+        let second = sync_at(&adapter, &db, "2026-11-12T13:00:00Z")
+            .await
+            .unwrap();
+
+        assert_eq!(first.inserted, 3);
+        // Only the first page: its 2 records are known.
+        assert_eq!((second.inserted, second.unchanged), (0, 2));
+    }
+
+    #[tokio::test]
+    async fn full_sync_reads_all_pages_again() {
+        let server = MockServer::start().await;
+        mount_two_pages(&server, 2).await;
+        let db = db::open_in_memory().await.unwrap();
+        let adapter = adapter(&server, "");
+
+        sync_at(&adapter, &db, "2026-11-12T12:00:00Z")
+            .await
+            .unwrap();
+        let full = sync_with(&adapter, &db, "2026-11-12T13:00:00Z", true)
+            .await
+            .unwrap();
+
+        assert_eq!((full.inserted, full.unchanged), (0, 3));
+    }
+
+    #[tokio::test]
+    async fn new_record_on_the_first_page_continues_to_the_next_page() {
+        let server = MockServer::start().await;
+        mount_two_pages(&server, 1).await;
+        let db = db::open_in_memory().await.unwrap();
+        // The database knows all the posts, except the newest one.
+        for rkey in ["3mu2lu2t2xi2o", "3jzfcijpj2z2a"] {
+            let uri = uri(POST, rkey);
+            let event = NewEvent {
+                source: SOURCE,
+                kind: POST,
+                external_id: &uri,
+                occurred_at: 0,
+                payload: "{}",
+            };
+            db::upsert_event(&db, &event, 0).await.unwrap();
+        }
+
+        let report = sync_at(&adapter(&server, ""), &db, "2026-11-12T12:00:00Z")
+            .await
+            .unwrap();
+
+        // Page 1 has a new record: page 2 is read too.
+        assert_eq!(report.inserted, 1);
+        assert_eq!(report.inserted + report.updated + report.unchanged, 3);
     }
 }
