@@ -3,6 +3,8 @@
 //! Bluesky, Tangled, standard.site... are not separate sources: they are
 //! collections (NSIDs) of the same repo, on the PDS of the account.
 
+use std::collections::HashSet;
+
 use jiff::Timestamp;
 use reqwest::Client;
 use serde::{Deserialize, de::DeserializeOwned};
@@ -92,6 +94,12 @@ impl Atproto {
     }
 
     pub async fn sync(&self, ctx: &SyncContext<'_>) -> Result<SyncReport, SourceError> {
+        // First, so that the database follows the config even if the PDS is down.
+        let mut report = SyncReport {
+            purged: self.purge_unwanted(ctx).await?,
+            ..SyncReport::default()
+        };
+
         let account = identity::resolve(ctx.client, &self.endpoints, &self.handle).await?;
         info!(did = %account.did, pds = %account.pds, "resolved the account");
 
@@ -102,16 +110,30 @@ impl Atproto {
         )
         .await?;
 
-        let mut report = SyncReport::default();
+        // The URIs seen upstream. Only a full run sees all of them.
+        let mut seen = HashSet::new();
         for nsid in &description.collections {
             if !self.wants(nsid) {
                 debug!(%nsid, "collection skipped by the config");
                 continue;
             }
             let before = report;
-            self.sync_collection(ctx, &account.pds, &account.did, nsid, &mut report)
-                .await?;
+            self.sync_collection(
+                ctx,
+                &account.pds,
+                &account.did,
+                nsid,
+                &mut report,
+                &mut seen,
+            )
+            .await?;
             debug!(%nsid, inserted = report.inserted - before.inserted, "collection done");
+        }
+
+        // Only after a full run that read every collection without an error:
+        // a missing URI is then a record deleted upstream.
+        if ctx.full {
+            report.deleted = self.mark_deleted(ctx, &seen).await?;
         }
 
         db::set_sync_state(
@@ -138,6 +160,7 @@ impl Atproto {
         did: &str,
         nsid: &str,
         report: &mut SyncReport,
+        seen: &mut HashSet<String>,
     ) -> Result<(), SourceError> {
         let url = format!("{pds}/xrpc/com.atproto.repo.listRecords");
         let mut cursor: Option<String> = None;
@@ -156,6 +179,9 @@ impl Atproto {
                 let upsert = upsert_record(ctx, nsid, record, self.oldest).await?;
                 all_known &= upsert != db::Upsert::Inserted;
                 report.count(upsert);
+                if ctx.full {
+                    seen.insert(record.uri.clone());
+                }
             }
 
             if !ctx.full && all_known && !page.records.is_empty() {
@@ -170,6 +196,37 @@ impl Atproto {
                 }
             }
         }
+    }
+
+    /// Deletes the rows of the kinds that the config no longer wants.
+    /// A toggle set to `false` must also be true for the database content.
+    async fn purge_unwanted(&self, ctx: &SyncContext<'_>) -> Result<u64, SourceError> {
+        let mut purged = 0;
+        for kind in db::event_kinds(ctx.db, SOURCE).await? {
+            if !self.wants(&kind) {
+                let rows = db::purge_kind(ctx.db, Some(SOURCE), &kind).await?;
+                info!(%kind, rows, "purged: disabled in the config");
+                purged += rows;
+            }
+        }
+        Ok(purged)
+    }
+
+    /// Marks the live rows that a full run did not see as deleted upstream.
+    async fn mark_deleted(
+        &self,
+        ctx: &SyncContext<'_>,
+        seen: &HashSet<String>,
+    ) -> Result<u64, SourceError> {
+        let missing: Vec<String> = db::live_event_ids(ctx.db, SOURCE)
+            .await?
+            .into_iter()
+            .filter(|id| !seen.contains(id))
+            .collect();
+        if !missing.is_empty() {
+            info!(count = missing.len(), "records deleted upstream");
+        }
+        Ok(db::mark_deleted(ctx.db, SOURCE, &missing, ctx.now.as_second()).await?)
     }
 }
 
@@ -654,5 +711,95 @@ mod tests {
         // Page 1 has a new record: page 2 is read too.
         assert_eq!(report.inserted, 1);
         assert_eq!(report.inserted + report.updated + report.unchanged, 3);
+    }
+
+    /// Stores an event that does not exist upstream (deleted on the PDS).
+    async fn insert_gone(db: &SqlitePool, kind: &str, rkey: &str) -> String {
+        let uri = uri(kind, rkey);
+        let event = NewEvent {
+            source: SOURCE,
+            kind,
+            external_id: &uri,
+            occurred_at: 0,
+            payload: "{}",
+        };
+        db::upsert_event(db, &event, 0).await.unwrap();
+        uri
+    }
+
+    async fn deleted_at(db: &SqlitePool, uri: &str) -> Option<i64> {
+        sqlx::query_scalar("SELECT deleted_at FROM events WHERE external_id = ?1")
+            .bind(uri)
+            .fetch_one(db)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn full_sync_marks_records_deleted_upstream() {
+        let server = MockServer::start().await;
+        mount_two_pages(&server, 2).await;
+        let db = db::open_in_memory().await.unwrap();
+        let gone = insert_gone(&db, POST, "3aaaaaaaaaaaa").await;
+        let adapter = adapter(&server, "");
+
+        // Incremental: a missing record proves nothing.
+        let incremental = sync_at(&adapter, &db, "2026-11-12T12:00:00Z")
+            .await
+            .unwrap();
+        assert_eq!(incremental.deleted, 0);
+        assert_eq!(deleted_at(&db, &gone).await, None);
+
+        let full = sync_with(&adapter, &db, "2026-11-12T13:00:00Z", true)
+            .await
+            .unwrap();
+        assert_eq!(full.deleted, 1);
+        assert_eq!(
+            deleted_at(&db, &gone).await,
+            Some(seconds("2026-11-12T13:00:00Z"))
+        );
+        // The records seen upstream stay live.
+        assert_eq!(db::live_event_ids(&db, SOURCE).await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn failed_full_sync_marks_nothing() {
+        let server = MockServer::start().await;
+        mount_account(&server, &[POST]).await;
+        Mock::given(method("GET"))
+            .and(path(LIST))
+            .respond_with(ResponseTemplate::new(502))
+            .mount(&server)
+            .await;
+        let db = db::open_in_memory().await.unwrap();
+        let kept = insert_gone(&db, POST, "3aaaaaaaaaaaa").await;
+
+        let result = sync_with(&adapter(&server, ""), &db, "2026-11-12T13:00:00Z", true).await;
+
+        assert!(result.is_err());
+        assert_eq!(deleted_at(&db, &kept).await, None);
+    }
+
+    #[tokio::test]
+    async fn disabled_kinds_are_purged_at_the_next_run() {
+        let server = MockServer::start().await;
+        // Empty database: the records of page 1 are new, so page 2 is read too.
+        mount_two_pages(&server, 1).await;
+        let db = db::open_in_memory().await.unwrap();
+        // Stored before the toggle and the exclusion were set.
+        insert_gone(&db, "app.bsky.feed.like", "3aaaaaaaaaaaa").await;
+        insert_gone(&db, "app.bsky.feed.like", "3aaaaaaaaaaab").await;
+        insert_gone(&db, "app.bsky.graph.follow", "3aaaaaaaaaaac").await;
+        let adapter = adapter(
+            &server,
+            "exclude = [\"app.bsky.graph\"]\n[bluesky]\nlikes = false",
+        );
+
+        let report = sync_at(&adapter, &db, "2026-11-12T12:00:00Z")
+            .await
+            .unwrap();
+
+        assert_eq!(report.purged, 3);
+        assert_eq!(db::event_kinds(&db, SOURCE).await.unwrap(), [POST]);
     }
 }

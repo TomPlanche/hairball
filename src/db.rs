@@ -181,6 +181,63 @@ pub async fn upsert_daily_count(
     })
 }
 
+/// The distinct kinds of the events of a source.
+pub async fn event_kinds(db: &SqlitePool, source: &str) -> Result<Vec<String>, DbError> {
+    Ok(
+        sqlx::query_scalar("SELECT DISTINCT kind FROM events WHERE source = ?1 ORDER BY kind")
+            .bind(source)
+            .fetch_all(db)
+            .await?,
+    )
+}
+
+/// Deletes all the events of one kind: of one source, or of all sources.
+/// Returns the number of deleted rows.
+pub async fn purge_kind(db: &SqlitePool, source: Option<&str>, kind: &str) -> Result<u64, DbError> {
+    let result = sqlx::query("DELETE FROM events WHERE kind = ?1 AND (?2 IS NULL OR source = ?2)")
+        .bind(kind)
+        .bind(source)
+        .execute(db)
+        .await?;
+    Ok(result.rows_affected())
+}
+
+/// The ids of the events of a source that are not marked as deleted.
+pub async fn live_event_ids(db: &SqlitePool, source: &str) -> Result<Vec<String>, DbError> {
+    Ok(sqlx::query_scalar(
+        "SELECT external_id FROM events WHERE source = ?1 AND deleted_at IS NULL",
+    )
+    .bind(source)
+    .fetch_all(db)
+    .await?)
+}
+
+/// Marks events as deleted upstream, in one transaction. The rows stay in the
+/// database: an upsert of the same event clears `deleted_at`.
+pub async fn mark_deleted(
+    db: &SqlitePool,
+    source: &str,
+    external_ids: &[String],
+    now: i64,
+) -> Result<u64, DbError> {
+    let mut tx = db.begin().await?;
+    let mut marked = 0;
+    for external_id in external_ids {
+        marked += sqlx::query(
+            "UPDATE events SET deleted_at = ?3
+             WHERE source = ?1 AND external_id = ?2 AND deleted_at IS NULL",
+        )
+        .bind(source)
+        .bind(external_id)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    }
+    tx.commit().await?;
+    Ok(marked)
+}
+
 /// Reads the `first_seen` time of an event, if the event is already stored.
 pub async fn event_first_seen(
     db: &SqlitePool,
@@ -269,6 +326,63 @@ mod tests {
             .fetch_one(db)
             .await
             .unwrap()
+    }
+
+    async fn insert(db: &SqlitePool, source: &str, kind: &str, external_id: &str) {
+        let event = NewEvent {
+            source,
+            kind,
+            external_id,
+            occurred_at: NOW,
+            payload: "{}",
+        };
+        upsert_event(db, &event, NOW).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn purge_deletes_one_kind() {
+        let db = open_in_memory().await.unwrap();
+        insert(&db, "atproto", "app.bsky.feed.like", "like-1").await;
+        insert(&db, "atproto", "app.bsky.feed.like", "like-2").await;
+        insert(&db, "atproto", "app.bsky.feed.post", "post-1").await;
+        insert(&db, "other", "app.bsky.feed.like", "like-3").await;
+
+        assert_eq!(
+            purge_kind(&db, Some("atproto"), "app.bsky.feed.like")
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            event_kinds(&db, "atproto").await.unwrap(),
+            ["app.bsky.feed.post"]
+        );
+        // Without a source: all the sources.
+        assert_eq!(
+            purge_kind(&db, None, "app.bsky.feed.like").await.unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn marked_events_are_no_longer_live() {
+        let db = open_in_memory().await.unwrap();
+        insert(&db, "atproto", "k", "a").await;
+        insert(&db, "atproto", "k", "b").await;
+
+        let marked = mark_deleted(&db, "atproto", &["a".to_owned(), "x".to_owned()], NOW + 1)
+            .await
+            .unwrap();
+
+        assert_eq!(marked, 1);
+        assert_eq!(live_event_ids(&db, "atproto").await.unwrap(), ["b"]);
+        // A second mark does not move `deleted_at`.
+        assert_eq!(
+            mark_deleted(&db, "atproto", &["a".to_owned()], NOW + 2)
+                .await
+                .unwrap(),
+            0
+        );
     }
 
     #[tokio::test]

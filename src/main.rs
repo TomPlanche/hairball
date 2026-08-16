@@ -6,11 +6,11 @@ use hairball::{
     check::{self, Endpoints, Status},
     config::Config,
     db, http,
-    sources::{self, Planned, SyncContext},
+    sources::{self, Planned, SyncContext, atproto::Atproto},
 };
 use jiff::Timestamp;
 use sqlx::SqlitePool;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 /// Collect my public activity from many platforms into one SQLite file.
@@ -115,8 +115,29 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             status(&config, &db).await
         }
         Command::Check => check(&config).await,
-        Command::Purge { kind } => bail!("`purge` is not implemented yet (kind: {kind})"),
+        Command::Purge { kind } => {
+            let db = open_db(&config).await?;
+            purge(&config, &db, &kind).await
+        }
     }
+}
+
+/// Deletes all the events of one kind, in all sources.
+async fn purge(config: &Config, db: &SqlitePool, kind: &str) -> anyhow::Result<()> {
+    let rows = db::purge_kind(db, None, kind).await?;
+    println!("deleted {rows} events of kind `{kind}`");
+
+    // A purge of a kind that the config still wants only lasts until the next sync.
+    if let Some(atproto) = &config.atproto
+        && Atproto::new(atproto).wants(kind)
+        && kind.contains('.')
+    {
+        warn!(
+            %kind,
+            "the next sync adds this kind again: add it to `exclude` in `[atproto]` to keep it out"
+        );
+    }
+    Ok(())
 }
 
 /// Runs each planned source, or only `only`. One failing source does not stop

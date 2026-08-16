@@ -8,10 +8,11 @@ The planned sources are ATProto (Bluesky, Tangled, standard.site), Gitea/Forgejo
 
 The project is at an early stage.
 
-- `sync` works for the ATProto source: it reads the records of the repo and stores one event per record (see "Sync"). The deletions and the purge of disabled kinds come later. The other sources are skipped with a log line.
+- `sync` works for the ATProto source: it reads the records of the repo, stores one event per record, marks the records deleted upstream and purges the disabled kinds (see "Sync"). The other sources are skipped with a log line.
 - `status` lists the configured sources with their last run, row counts and cursor.
 - `check` tests the secrets and the ATProto identity against the real APIs.
-- `export` and `purge` return a "not implemented yet" error.
+- `purge` deletes all the events of one kind.
+- `export` returns a "not implemented yet" error.
 
 ## Logs
 
@@ -79,6 +80,22 @@ All times are unix seconds, UTC.
 - **Full** (`--full`, for the daily run): the CLI reads all the pages of all the collections.
 
 A record with a key that is not a TID (a custom key) can appear on any page. The incremental mode can miss it, and the next full run finds it.
+
+### Deletions
+
+Only a full run sees all the records. After a full run that read every collection without an error, the CLI sets `deleted_at` on each row that the run did not see: the record was deleted upstream. The row stays in the database. If the record comes back, the next sync clears `deleted_at`. An incremental run, or a full run that failed, marks nothing.
+
+### Disabled kinds
+
+A kind that the config no longer wants (in `exclude`, or a `[atproto.bluesky]` toggle set to `false`) is not only skipped: at the start of the next sync, the CLI deletes all its rows. The database then contains only what the config enables.
+
+To delete the rows of one kind by hand, use `purge`:
+
+```bash
+cargo run -- purge --kind app.rocksky.album
+```
+
+If the config still wants this kind, the command warns you: the next sync adds the rows again. Add the kind to `exclude` to keep it out.
 
 ## Time
 
@@ -186,7 +203,9 @@ cargo run --release -- sync --source atproto
 
 The last log line must show `sync done: N inserted`. Then `status` must show the same number of events on the `atproto` line, and a last run. For a repo of about 50 000 records, this first run takes about 2 minutes.
 
-Run `sync` a second time: it is incremental, so it must take a few seconds (about 10 s for 50 000 records), with `0 inserted` and only a small number of `unchanged` records. Then run `sync --full`: it must read everything again, with `0 inserted, 0 updated, N unchanged`. With `RUST_LOG=hairball=debug`, each collection logs `only known records: stop` or `last page`.
+Run `sync` a second time: it is incremental, so it must take a few seconds (about 10 s for 50 000 records), with `0 inserted` and only a small number of `unchanged` records. Then run `sync --full`: it must read everything again, with `0 inserted, 0 updated, N unchanged`, and `D deleted` if records were deleted upstream since the first run. `status` then shows these `D` rows in the `DELETED` column. With `RUST_LOG=hairball=debug`, each collection logs `only known records: stop` or `last page`.
+
+To see the purge, add a kind that has rows to `exclude` (for example `app.bsky.feed.like`), then run `sync`: the log must show `purged: disabled in the config` with the number of rows, and `status` must show fewer events.
 
 An unknown source id must stop the command with the list of the configured sources:
 
