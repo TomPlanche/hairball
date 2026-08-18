@@ -97,6 +97,16 @@ cargo run -- purge --kind app.rocksky.album
 
 If the config still wants this kind, the command warns you: the next sync adds the rows again. Add the kind to `exclude` to keep it out.
 
+### Rate limits
+
+A PDS limits the number of requests. When it answers HTTP 429, the CLI waits, then sends the request again, at most 3 times. The wait comes from the response:
+
+1. `ratelimit-reset` (ATProto PDS): the unix time when the limit resets, plus 1 second.
+2. `retry-after` (standard HTTP): a number of seconds.
+3. Without these headers: 1, 2, then 4 seconds.
+
+If the wait is longer than 10 minutes, the CLI does not wait: the sync of the source fails, and the next run continues. Each wait is a warning in the log, with the URL and the number of seconds.
+
 ## Time
 
 The database stores UTC times only. The CLI groups the events into days only at export time, in the time zone of `timezone` in the config (an IANA name, default: `Europe/Paris`). For example, 23:30 UTC on 15 January is 16 January in Paris. The CLI reads the time zone from the system time zone database: the server needs the `tzdata` package.
@@ -206,6 +216,12 @@ The last log line must show `sync done: N inserted`. Then `status` must show the
 Run `sync` a second time: it is incremental, so it must take a few seconds (about 10 s for 50 000 records), with `0 inserted` and only a small number of `unchanged` records. Then run `sync --full`: it must read everything again, with `0 inserted, 0 updated, N unchanged`, and `D deleted` if records were deleted upstream since the first run. `status` then shows these `D` rows in the `DELETED` column. With `RUST_LOG=hairball=debug`, each collection logs `only known records: stop` or `last page`.
 
 To see the purge, add a kind that has rows to `exclude` (for example `app.bsky.feed.like`), then run `sync`: the log must show `purged: disabled in the config` with the number of rows, and `status` must show fewer events.
+
+A real PDS rarely answers HTTP 429 for one repo. The retry has unit tests with a mock server: a 429 then a success, 4 answers 429 (1 try and 3 retries), and a reset time too far away:
+
+```bash
+cargo test http::
+```
 
 An unknown source id must stop the command with the list of the configured sources:
 

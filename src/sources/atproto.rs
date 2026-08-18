@@ -15,6 +15,7 @@ use super::{SourceError, SyncContext, SyncReport};
 use crate::{
     config::{AtprotoConfig, BlueskyToggles},
     db::{self, NewEvent, SyncState},
+    http,
     identity::{self, IdentityEndpoints},
     time,
 };
@@ -266,13 +267,13 @@ async fn upsert_record(
     .await?)
 }
 
-/// Sends an XRPC query and decodes the JSON answer.
+/// Sends an XRPC query and decodes the JSON answer. Retries on HTTP 429.
 async fn xrpc_get<T: DeserializeOwned>(
     client: &Client,
     url: &str,
     query: &[(&str, &str)],
 ) -> Result<T, SourceError> {
-    let response = client.get(url).query(query).send().await?;
+    let response = http::send_with_retry(client.get(url).query(query)).await?;
     let status = response.status();
     if !status.is_success() {
         let message = response
@@ -300,7 +301,6 @@ mod tests {
     };
 
     use super::*;
-    use crate::http;
 
     const DID: &str = "did:plc:abc";
     const LIST: &str = "/xrpc/com.atproto.repo.listRecords";
@@ -801,5 +801,27 @@ mod tests {
 
         assert_eq!(report.purged, 3);
         assert_eq!(db::event_kinds(&db, SOURCE).await.unwrap(), [POST]);
+    }
+
+    #[tokio::test]
+    async fn rate_limited_page_is_retried() {
+        let server = MockServer::start().await;
+        // Mounted first: the first `listRecords` call gets a 429, with a reset
+        // time in the past (no wait in the test).
+        Mock::given(method("GET"))
+            .and(path(LIST))
+            .respond_with(ResponseTemplate::new(429).insert_header("ratelimit-reset", "0"))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        mount_two_pages(&server, 1).await;
+        let db = db::open_in_memory().await.unwrap();
+
+        let report = sync_at(&adapter(&server, ""), &db, "2026-11-12T12:00:00Z")
+            .await
+            .unwrap();
+
+        assert_eq!(report.inserted, 3);
     }
 }
