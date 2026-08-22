@@ -3,10 +3,10 @@
 //! All times are unix seconds, UTC. Every write is idempotent: the same input
 //! two times gives [`Upsert::Unchanged`] the second time.
 
-use std::{path::Path, str::FromStr};
+use std::{collections::BTreeMap, path::Path, str::FromStr};
 
 use sqlx::{
-    SqlitePool,
+    SqliteConnection, SqlitePool,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
 };
 
@@ -149,6 +149,17 @@ pub async fn upsert_daily_count(
     day: &str,
     count: i64,
 ) -> Result<Upsert, DbError> {
+    let mut conn = db.acquire().await?;
+    upsert_daily_count_on(&mut conn, source, day, count).await
+}
+
+/// [`upsert_daily_count`] on one connection, for use in a transaction.
+async fn upsert_daily_count_on(
+    conn: &mut SqliteConnection,
+    source: &str,
+    day: &str,
+    count: i64,
+) -> Result<Upsert, DbError> {
     let inserted = sqlx::query(
         "INSERT INTO daily_counts (source, day, count) VALUES (?1, ?2, ?3)
          ON CONFLICT (source, day) DO NOTHING",
@@ -156,7 +167,7 @@ pub async fn upsert_daily_count(
     .bind(source)
     .bind(day)
     .bind(count)
-    .execute(db)
+    .execute(&mut *conn)
     .await?
     .rows_affected();
     if inserted > 0 {
@@ -170,7 +181,7 @@ pub async fn upsert_daily_count(
     .bind(source)
     .bind(day)
     .bind(count)
-    .execute(db)
+    .execute(&mut *conn)
     .await?
     .rows_affected();
 
@@ -179,6 +190,55 @@ pub async fn upsert_daily_count(
     } else {
         Upsert::Unchanged
     })
+}
+
+/// What [`replace_daily_counts`] did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Replaced {
+    pub inserted: u64,
+    pub updated: u64,
+    pub unchanged: u64,
+    /// Days of the window that the new counts no longer have.
+    pub removed: u64,
+}
+
+/// Replaces the counts of a source from `from_day` (inclusive, `YYYY-MM-DD`)
+/// with `counts`, in one transaction. Days before `from_day` stay as they are:
+/// they are history that the source no longer returns.
+pub async fn replace_daily_counts(
+    db: &SqlitePool,
+    source: &str,
+    from_day: &str,
+    counts: &BTreeMap<String, i64>,
+) -> Result<Replaced, DbError> {
+    let mut tx = db.begin().await?;
+    let mut replaced = Replaced::default();
+
+    for (day, &count) in counts {
+        match upsert_daily_count_on(&mut tx, source, day, count).await? {
+            Upsert::Inserted => replaced.inserted += 1,
+            Upsert::Updated => replaced.updated += 1,
+            Upsert::Unchanged => replaced.unchanged += 1,
+        }
+    }
+
+    let stored: Vec<String> =
+        sqlx::query_scalar("SELECT day FROM daily_counts WHERE source = ?1 AND day >= ?2")
+            .bind(source)
+            .bind(from_day)
+            .fetch_all(&mut *tx)
+            .await?;
+    for day in stored.iter().filter(|day| !counts.contains_key(*day)) {
+        replaced.removed += sqlx::query("DELETE FROM daily_counts WHERE source = ?1 AND day = ?2")
+            .bind(source)
+            .bind(day)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+    }
+
+    tx.commit().await?;
+    Ok(replaced)
 }
 
 /// The distinct kinds of the events of a source.
@@ -362,6 +422,61 @@ mod tests {
             purge_kind(&db, None, "app.bsky.feed.like").await.unwrap(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn replace_keeps_history_and_removes_days_of_the_window() {
+        let db = open_in_memory().await.unwrap();
+        // Before the window: history to keep.
+        upsert_daily_count(&db, "gitea:x", "2025-01-01", 4)
+            .await
+            .unwrap();
+        // In the window, but no longer in the source.
+        upsert_daily_count(&db, "gitea:x", "2026-05-01", 2)
+            .await
+            .unwrap();
+        upsert_daily_count(&db, "gitea:x", "2026-06-01", 1)
+            .await
+            .unwrap();
+        // Another source: never touched.
+        upsert_daily_count(&db, "github", "2026-05-01", 9)
+            .await
+            .unwrap();
+
+        let counts = BTreeMap::from([("2026-06-01".to_owned(), 3), ("2026-07-01".to_owned(), 5)]);
+        let replaced = replace_daily_counts(&db, "gitea:x", "2026-01-01", &counts)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            replaced,
+            Replaced {
+                inserted: 1,
+                updated: 1,
+                unchanged: 0,
+                removed: 1,
+            }
+        );
+        let rows: Vec<(String, String, i64)> =
+            sqlx::query_as("SELECT source, day, count FROM daily_counts ORDER BY source, day")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(
+            rows,
+            [
+                ("gitea:x".to_owned(), "2025-01-01".to_owned(), 4),
+                ("gitea:x".to_owned(), "2026-06-01".to_owned(), 3),
+                ("gitea:x".to_owned(), "2026-07-01".to_owned(), 5),
+                ("github".to_owned(), "2026-05-01".to_owned(), 9),
+            ]
+        );
+
+        // The same counts again: nothing changes.
+        let again = replace_daily_counts(&db, "gitea:x", "2026-01-01", &counts)
+            .await
+            .unwrap();
+        assert_eq!((again.unchanged, again.removed), (2, 0));
     }
 
     #[tokio::test]

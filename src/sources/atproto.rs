@@ -11,7 +11,7 @@ use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::Value;
 use tracing::{debug, info, warn};
 
-use super::{SourceError, SyncContext, SyncReport};
+use super::{SourceError, SyncContext, SyncReport, api_error};
 use crate::{
     config::{AtprotoConfig, BlueskyToggles},
     db::{self, NewEvent, SyncState},
@@ -51,11 +51,6 @@ struct RecordPage {
 struct Record {
     uri: String,
     value: Value,
-}
-
-#[derive(Deserialize)]
-struct XrpcError {
-    message: Option<String>,
 }
 
 impl Atproto {
@@ -274,19 +269,8 @@ async fn xrpc_get<T: DeserializeOwned>(
     query: &[(&str, &str)],
 ) -> Result<T, SourceError> {
     let response = http::send_with_retry(client.get(url).query(query)).await?;
-    let status = response.status();
-    if !status.is_success() {
-        let message = response
-            .json::<XrpcError>()
-            .await
-            .ok()
-            .and_then(|error| error.message)
-            .unwrap_or_else(|| "no message".to_owned());
-        return Err(SourceError::Api {
-            url: url.to_owned(),
-            status,
-            message,
-        });
+    if !response.status().is_success() {
+        return Err(api_error(url, response).await);
     }
     Ok(response.json().await?)
 }

@@ -4,11 +4,13 @@
 //! of an enum, not `Box<dyn Source>`.
 
 pub mod atproto;
+pub mod gitea;
 
 use std::fmt;
 
 use jiff::Timestamp;
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, Response, StatusCode};
+use serde::Deserialize;
 use sqlx::SqlitePool;
 
 use crate::{config::Config, db, db::DbError, identity::IdentityError};
@@ -78,10 +80,32 @@ pub enum SourceError {
     Json(#[from] serde_json::Error),
 }
 
+/// Builds the error of a response with an HTTP error status. ATProto (XRPC)
+/// and Gitea both send a JSON body with a `message` field.
+pub(crate) async fn api_error(url: &str, response: Response) -> SourceError {
+    #[derive(Deserialize)]
+    struct ErrorBody {
+        message: Option<String>,
+    }
+    let status = response.status();
+    let message = response
+        .json::<ErrorBody>()
+        .await
+        .ok()
+        .and_then(|body| body.message)
+        .unwrap_or_else(|| "no message".to_owned());
+    SourceError::Api {
+        url: url.to_owned(),
+        status,
+        message,
+    }
+}
+
 /// A source adapter, ready to run.
 #[derive(Debug, Clone)]
 pub enum AnySource {
     Atproto(atproto::Atproto),
+    Gitea(gitea::Gitea),
 }
 
 impl AnySource {
@@ -89,6 +113,7 @@ impl AnySource {
     pub fn id(&self) -> String {
         match self {
             Self::Atproto(_) => atproto::SOURCE.to_owned(),
+            Self::Gitea(source) => source.id(),
         }
     }
 
@@ -96,6 +121,7 @@ impl AnySource {
     pub async fn sync(&self, ctx: &SyncContext<'_>) -> Result<SyncReport, SourceError> {
         match self {
             Self::Atproto(source) => source.sync(ctx).await,
+            Self::Gitea(source) => source.sync(ctx).await,
         }
     }
 }
@@ -156,13 +182,13 @@ pub fn plan(config: &Config) -> Vec<Planned> {
         };
         planned.push(skip("bsky_bookmarks", reason));
     }
-    for gitea in &config.gitea {
-        let reason = if gitea.mirror {
-            SkipReason::Mirror
+    for instance in &config.gitea {
+        let source = gitea::Gitea::new(instance, config.time_zone.clone());
+        planned.push(if instance.mirror {
+            skip(&source.id(), SkipReason::Mirror)
         } else {
-            SkipReason::NotImplemented
-        };
-        planned.push(skip(&format!("gitea:{}", gitea.name), reason));
+            Planned::Run(AnySource::Gitea(source))
+        });
     }
     if config.github.is_some() {
         planned.push(skip("github", SkipReason::NotImplemented));
@@ -194,10 +220,7 @@ mod tests {
             [
                 ("atproto".to_owned(), None),
                 ("bsky_bookmarks".to_owned(), Some(SkipReason::Disabled)),
-                (
-                    "gitea:codeberg".to_owned(),
-                    Some(SkipReason::NotImplemented)
-                ),
+                ("gitea:codeberg".to_owned(), None),
                 ("gitea:forge-perso".to_owned(), Some(SkipReason::Mirror)),
                 ("github".to_owned(), Some(SkipReason::NotImplemented)),
                 ("lastfm".to_owned(), Some(SkipReason::NotImplemented)),

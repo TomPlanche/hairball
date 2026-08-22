@@ -8,7 +8,11 @@ The planned sources are ATProto (Bluesky, Tangled, standard.site), Gitea/Forgejo
 
 The project is at an early stage.
 
-- `sync` works for the ATProto source: it reads the records of the repo, stores one event per record, marks the records deleted upstream and purges the disabled kinds (see "Sync"). The other sources are skipped with a log line.
+- `sync` works for 2 sources (see "Sync"):
+  - ATProto: it reads the records of the repo, stores one event per record, marks the records deleted upstream and purges the disabled kinds.
+  - Gitea, Forgejo and Codeberg: it reads the contribution heatmap of each instance and stores one count per day.
+
+  The other sources are skipped with a log line.
 - `status` lists the configured sources with their last run, row counts and cursor.
 - `check` tests the secrets and the ATProto identity against the real APIs.
 - `purge` deletes all the events of one kind.
@@ -96,6 +100,18 @@ cargo run -- purge --kind app.rocksky.album
 ```
 
 If the config still wants this kind, the command warns you: the next sync adds the rows again. Add the kind to `exclude` to keep it out.
+
+### Gitea, Forgejo and Codeberg
+
+Each `[[gitea]]` entry is one source, with the id `gitea:<name>`. Codeberg runs Forgejo, and Forgejo is a fork of Gitea: the 3 have the same `/api/v1` endpoints.
+
+1. The CLI reads `GET <url>/api/v1/users/<user>/heatmap`. The answer is a list of `{ "timestamp": <unix>, "contributions": <n> }`, one per 15-minute slot, for about the last year.
+2. It sums the slots per day, in the time zone of the config.
+3. It replaces the days of the last 360 days in `daily_counts`: a day that the heatmap no longer has (for example after the deletion of a repository) is removed. The older days stay: they are history that the heatmap no longer returns.
+
+The request never sends a token. With a token, older Gitea versions computed the heatmap with all the repositories that the token can read, so private activity leaked into the result. An anonymous request returns public activity only.
+
+An instance with `mirror = true` is skipped, with one log line: it mirrors repositories of another source, and an aggregate cannot be deduplicated after the fact.
 
 ### Rate limits
 
@@ -223,6 +239,13 @@ A real PDS rarely answers HTTP 429 for one repo. The retry has unit tests with a
 cargo test http::
 ```
 
+The unit tests of the Gitea adapter use a real heatmap of Codeberg (`tests/fixtures/codeberg_heatmap.json`). They check the sums per day in `Europe/Paris` and in `UTC`, and that the request has no `Authorization` header. To test a real instance, set your login in a `[[gitea]]` entry, then run the sync 2 times:
+
+```bash
+cargo run -- sync --source gitea:codeberg
+```
+
+The first run must show `N inserted`, the second `0 inserted, 0 updated, N unchanged`. `status` must show `N` in the `DAYS` column of the source. A `[[gitea]]` entry with `mirror = true` must show `skipped: mirror of another source`.
 An unknown source id must stop the command with the list of the configured sources:
 
 ```bash

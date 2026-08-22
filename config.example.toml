@@ -33,9 +33,9 @@ app_password_env = "BSKY_APP_PASSWORD"
 # Gitea, Forgejo, Codeberg: no token, on purpose. With a token, older Gitea
 # versions add private activity to the heatmap. The CLI sends anonymous calls.
 [[gitea]]
-name = "codeberg"
+name = "codeberg"                   # source id: gitea:codeberg
 url = "https://codeberg.org"
-user = "TomPlanche"
+user = "tom_planche"                # the login, as in the profile URL
 
 [[gitea]]
 name = "forge-perso"
