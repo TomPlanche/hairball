@@ -5,6 +5,7 @@
 
 pub mod atproto;
 pub mod gitea;
+pub mod github;
 
 use std::fmt;
 
@@ -73,6 +74,12 @@ pub enum SourceError {
     #[error("cannot find the PDS of the account")]
     Identity(#[from] IdentityError),
 
+    #[error("the environment variable `{0}` is not set or is empty")]
+    MissingSecret(String),
+
+    #[error("{url} returned a GraphQL error: {message}")]
+    Graphql { url: String, message: String },
+
     #[error("database error")]
     Db(#[from] DbError),
 
@@ -106,6 +113,7 @@ pub(crate) async fn api_error(url: &str, response: Response) -> SourceError {
 pub enum AnySource {
     Atproto(atproto::Atproto),
     Gitea(gitea::Gitea),
+    Github(github::Github),
 }
 
 impl AnySource {
@@ -114,6 +122,7 @@ impl AnySource {
         match self {
             Self::Atproto(_) => atproto::SOURCE.to_owned(),
             Self::Gitea(source) => source.id(),
+            Self::Github(_) => github::SOURCE.to_owned(),
         }
     }
 
@@ -122,6 +131,7 @@ impl AnySource {
         match self {
             Self::Atproto(source) => source.sync(ctx).await,
             Self::Gitea(source) => source.sync(ctx).await,
+            Self::Github(source) => source.sync(ctx).await,
         }
     }
 }
@@ -190,8 +200,8 @@ pub fn plan(config: &Config) -> Vec<Planned> {
             Planned::Run(AnySource::Gitea(source))
         });
     }
-    if config.github.is_some() {
-        planned.push(skip("github", SkipReason::NotImplemented));
+    if let Some(github) = &config.github {
+        planned.push(Planned::Run(AnySource::Github(github::Github::new(github))));
     }
     if config.lastfm.is_some() {
         planned.push(skip("lastfm", SkipReason::NotImplemented));
@@ -222,7 +232,7 @@ mod tests {
                 ("bsky_bookmarks".to_owned(), Some(SkipReason::Disabled)),
                 ("gitea:codeberg".to_owned(), None),
                 ("gitea:forge-perso".to_owned(), Some(SkipReason::Mirror)),
-                ("github".to_owned(), Some(SkipReason::NotImplemented)),
+                ("github".to_owned(), None),
                 ("lastfm".to_owned(), Some(SkipReason::NotImplemented)),
             ]
         );

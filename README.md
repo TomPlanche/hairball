@@ -8,9 +8,10 @@ The planned sources are ATProto (Bluesky, Tangled, standard.site), Gitea/Forgejo
 
 The project is at an early stage.
 
-- `sync` works for 2 sources (see "Sync"):
+- `sync` works for 3 sources (see "Sync"):
   - ATProto: it reads the records of the repo, stores one event per record, marks the records deleted upstream and purges the disabled kinds.
   - Gitea, Forgejo and Codeberg: it reads the contribution heatmap of each instance and stores one count per day.
+  - GitHub: it reads the contribution calendar with the GraphQL API and stores one count per day.
 
   The other sources are skipped with a log line.
 - `status` lists the configured sources with their last run, row counts and cursor.
@@ -112,6 +113,20 @@ Each `[[gitea]]` entry is one source, with the id `gitea:<name>`. Codeberg runs 
 The request never sends a token. With a token, older Gitea versions computed the heatmap with all the repositories that the token can read, so private activity leaked into the result. An anonymous request returns public activity only.
 
 An instance with `mirror = true` is skipped, with one log line: it mirrors repositories of another source, and an aggregate cannot be deduplicated after the fact.
+
+### GitHub
+
+The GitHub source uses the GraphQL API (`POST https://api.github.com/graphql`) with the token of the environment variable `token_env` (see "Secrets" for its rights).
+
+1. The CLI reads the creation date of the account (`user { createdAt }`).
+2. It reads the contribution calendar year by year: one query covers 1 year at most. A full run reads every year since the creation of the account. An incremental run reads the current and the previous year.
+3. It stores each day of the calendar in `daily_counts` with the source `github`, as GitHub gives it, days with 0 contributions included.
+
+The calendar can include private contributions, if the profile setting "Include private contributions on my profile" is on. The CLI stores only the total per day, never a repository name.
+
+GraphQL can report an error with HTTP 200 and an `errors` array, for example an unknown user: the sync of the source then fails with the message of GitHub.
+
+Open question: GitHub groups the calendar days in UTC, or in the time zone of the profile? The GraphQL documentation does not say. To check it, make a commit between 00:00 and 01:00 in Paris (between 22:00 and 23:00 UTC the day before), run `sync --source github`, then look at which day gets the contribution in `daily_counts`.
 
 ### Rate limits
 
@@ -246,6 +261,14 @@ cargo run -- sync --source gitea:codeberg
 ```
 
 The first run must show `N inserted`, the second `0 inserted, 0 updated, N unchanged`. `status` must show `N` in the `DAYS` column of the source. A `[[gitea]]` entry with `mirror = true` must show `skipped: mirror of another source`.
+
+The unit tests of the GitHub adapter use a mock GraphQL server: the loop over the years, the incremental range, a GraphQL error with HTTP 200, a bad token and a missing token. To test the real API, set `GITHUB_TOKEN` (see "Secrets"), then run:
+
+```bash
+cargo run -- sync --source github --full
+```
+
+The log must show `sync done: N inserted`, with about 365 days per year since the creation of the account. Without the variable, the sync of the source must fail with `the environment variable GITHUB_TOKEN is not set or is empty`, before any request.
 An unknown source id must stop the command with the list of the configured sources:
 
 ```bash
