@@ -6,6 +6,7 @@
 pub mod atproto;
 pub mod gitea;
 pub mod github;
+pub mod lastfm;
 
 use std::fmt;
 
@@ -80,6 +81,9 @@ pub enum SourceError {
     #[error("{url} returned a GraphQL error: {message}")]
     Graphql { url: String, message: String },
 
+    #[error("Last.fm request failed")]
+    Lastfm(#[from] lastfm_client::LastFmError),
+
     #[error("database error")]
     Db(#[from] DbError),
 
@@ -114,6 +118,7 @@ pub enum AnySource {
     Atproto(atproto::Atproto),
     Gitea(gitea::Gitea),
     Github(github::Github),
+    Lastfm(lastfm::Lastfm),
 }
 
 impl AnySource {
@@ -123,6 +128,7 @@ impl AnySource {
             Self::Atproto(_) => atproto::SOURCE.to_owned(),
             Self::Gitea(source) => source.id(),
             Self::Github(_) => github::SOURCE.to_owned(),
+            Self::Lastfm(_) => lastfm::SOURCE.to_owned(),
         }
     }
 
@@ -132,6 +138,7 @@ impl AnySource {
             Self::Atproto(source) => source.sync(ctx).await,
             Self::Gitea(source) => source.sync(ctx).await,
             Self::Github(source) => source.sync(ctx).await,
+            Self::Lastfm(source) => source.sync(ctx).await,
         }
     }
 }
@@ -203,8 +210,8 @@ pub fn plan(config: &Config) -> Vec<Planned> {
     if let Some(github) = &config.github {
         planned.push(Planned::Run(AnySource::Github(github::Github::new(github))));
     }
-    if config.lastfm.is_some() {
-        planned.push(skip("lastfm", SkipReason::NotImplemented));
+    if let Some(lastfm) = &config.lastfm {
+        planned.push(Planned::Run(AnySource::Lastfm(lastfm::Lastfm::new(lastfm))));
     }
 
     planned
@@ -233,7 +240,7 @@ mod tests {
                 ("gitea:codeberg".to_owned(), None),
                 ("gitea:forge-perso".to_owned(), Some(SkipReason::Mirror)),
                 ("github".to_owned(), None),
-                ("lastfm".to_owned(), Some(SkipReason::NotImplemented)),
+                ("lastfm".to_owned(), None),
             ]
         );
         // The same ids as `status`.

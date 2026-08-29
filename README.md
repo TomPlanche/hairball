@@ -8,10 +8,11 @@ The planned sources are ATProto (Bluesky, Tangled, standard.site), Gitea/Forgejo
 
 The project is at an early stage.
 
-- `sync` works for 3 sources (see "Sync"):
+- `sync` works for 4 sources (see "Sync"):
   - ATProto: it reads the records of the repo, stores one event per record, marks the records deleted upstream and purges the disabled kinds.
   - Gitea, Forgejo and Codeberg: it reads the contribution heatmap of each instance and stores one count per day.
   - GitHub: it reads the contribution calendar with the GraphQL API and stores one count per day.
+  - Last.fm: it reads the scrobbles and stores one event per scrobble.
 
   The other sources are skipped with a log line.
 - `status` lists the configured sources with their last run, row counts and cursor.
@@ -127,6 +128,20 @@ The calendar can include private contributions, if the profile setting "Include 
 GraphQL can report an error with HTTP 200 and an `errors` array, for example an unknown user: the sync of the source then fails with the message of GitHub.
 
 Open question: GitHub groups the calendar days in UTC, or in the time zone of the profile? The GraphQL documentation does not say. To check it, make a commit between 00:00 and 01:00 in Paris (between 22:00 and 23:00 UTC the day before), run `sync --source github`, then look at which day gets the contribution in `daily_counts`.
+
+### Last.fm
+
+The Last.fm source uses the crate `lastfm-client` (method `user.getRecentTracks`), with the API key of the environment variable `api_key_env`.
+
+1. An incremental run reads the scrobbles from the cursor: the highest `uts` (unix time of the scrobble) already stored. A full run reads the whole history.
+2. The CLI skips the track that plays now: it has no date, so it is not a scrobble yet.
+3. It stores each scrobble in `events`, with the kind `scrobble`, the time `uts`, and the id `<uts>:<artist>:<track>`: Last.fm scrobbles have no stable id.
+
+The cursor scrobble comes back at each incremental run, unchanged: a repeated scrobble is safer than a gap.
+
+Last.fm puts the track that plays now on top of the requested number of scrobbles. `lastfm-client` 5.0.0 counted it in this number, so the oldest scrobble of the page was cut while a track played. The fix is in `lastfm-client` 5.1.0: hairball needs this version or a later one.
+
+If you also scrobble to an ATProto app (Rocksky, teal.fm), each listen exists 2 times: in Last.fm and in the ATProto repo. Exclude one of the 2 to count each listen once.
 
 ### Rate limits
 
@@ -269,6 +284,14 @@ cargo run -- sync --source github --full
 ```
 
 The log must show `sync done: N inserted`, with about 365 days per year since the creation of the account. Without the variable, the sync of the source must fail with `the environment variable GITHUB_TOKEN is not set or is empty`, before any request.
+
+The unit tests of the Last.fm adapter send the requests of `lastfm-client` to a mock server: the scrobbles and their time, the cursor of the next run, the skip of the playing track, and a missing API key. To test the real API, set your user in `[lastfm]` and `LASTFM_API_KEY` (see "Secrets"), then run 2 times:
+
+```bash
+cargo run -- sync --source lastfm
+```
+
+The first run reads the whole history and must show `N inserted`. The second run must show `0 inserted` and `1 unchanged` (the cursor scrobble), and `status` must show the cursor (a unix time) on the `lastfm` line.
 An unknown source id must stop the command with the list of the configured sources:
 
 ```bash
