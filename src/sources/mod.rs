@@ -4,6 +4,7 @@
 //! of an enum, not `Box<dyn Source>`.
 
 pub mod atproto;
+pub mod bsky_bookmarks;
 pub mod gitea;
 pub mod github;
 pub mod lastfm;
@@ -116,6 +117,7 @@ pub(crate) async fn api_error(url: &str, response: Response) -> SourceError {
 #[derive(Debug, Clone)]
 pub enum AnySource {
     Atproto(atproto::Atproto),
+    BskyBookmarks(bsky_bookmarks::BskyBookmarks),
     Gitea(gitea::Gitea),
     Github(github::Github),
     Lastfm(lastfm::Lastfm),
@@ -126,6 +128,7 @@ impl AnySource {
     pub fn id(&self) -> String {
         match self {
             Self::Atproto(_) => atproto::SOURCE.to_owned(),
+            Self::BskyBookmarks(_) => bsky_bookmarks::SOURCE.to_owned(),
             Self::Gitea(source) => source.id(),
             Self::Github(_) => github::SOURCE.to_owned(),
             Self::Lastfm(_) => lastfm::SOURCE.to_owned(),
@@ -136,6 +139,7 @@ impl AnySource {
     pub async fn sync(&self, ctx: &SyncContext<'_>) -> Result<SyncReport, SourceError> {
         match self {
             Self::Atproto(source) => source.sync(ctx).await,
+            Self::BskyBookmarks(source) => source.sync(ctx).await,
             Self::Gitea(source) => source.sync(ctx).await,
             Self::Github(source) => source.sync(ctx).await,
             Self::Lastfm(source) => source.sync(ctx).await,
@@ -146,18 +150,14 @@ impl AnySource {
 /// Why a configured source does not run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkipReason {
-    Disabled,
     /// A Gitea instance that mirrors another source (it would count each commit twice).
     Mirror,
-    NotImplemented,
 }
 
 impl fmt::Display for SkipReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::Disabled => "disabled in the config",
             Self::Mirror => "mirror of another source",
-            Self::NotImplemented => "adapter not implemented yet",
         })
     }
 }
@@ -192,12 +192,10 @@ pub fn plan(config: &Config) -> Vec<Planned> {
         ))));
     }
     if let Some(bookmarks) = &config.bsky_bookmarks {
-        let reason = if bookmarks.enabled {
-            SkipReason::NotImplemented
-        } else {
-            SkipReason::Disabled
-        };
-        planned.push(skip("bsky_bookmarks", reason));
+        // Even when disabled: the sync then purges the stored bookmarks.
+        planned.push(Planned::Run(AnySource::BskyBookmarks(
+            bsky_bookmarks::BskyBookmarks::new(bookmarks),
+        )));
     }
     for instance in &config.gitea {
         let source = gitea::Gitea::new(instance, config.time_zone.clone());
@@ -236,7 +234,7 @@ mod tests {
             planned,
             [
                 ("atproto".to_owned(), None),
-                ("bsky_bookmarks".to_owned(), Some(SkipReason::Disabled)),
+                ("bsky_bookmarks".to_owned(), None),
                 ("gitea:codeberg".to_owned(), None),
                 ("gitea:forge-perso".to_owned(), Some(SkipReason::Mirror)),
                 ("github".to_owned(), None),

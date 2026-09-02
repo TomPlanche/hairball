@@ -8,13 +8,14 @@ The planned sources are ATProto (Bluesky, Tangled, standard.site), Gitea/Forgejo
 
 The project is at an early stage.
 
-- `sync` works for 4 sources (see "Sync"):
+- `sync` works for all the sources (see "Sync"):
   - ATProto: it reads the records of the repo, stores one event per record, marks the records deleted upstream and purges the disabled kinds.
   - Gitea, Forgejo and Codeberg: it reads the contribution heatmap of each instance and stores one count per day.
   - GitHub: it reads the contribution calendar with the GraphQL API and stores one count per day.
   - Last.fm: it reads the scrobbles and stores one event per scrobble.
+  - Bluesky bookmarks: it reads the saved posts with an app password and stores one event per bookmark.
 
-  The other sources are skipped with a log line.
+  A Gitea instance with `mirror = true` is skipped with a log line.
 - `status` lists the configured sources with their last run, row counts and cursor.
 - `check` tests the secrets and the ATProto identity against the real APIs.
 - `purge` deletes all the events of one kind.
@@ -142,6 +143,18 @@ The cursor scrobble comes back at each incremental run, unchanged: a repeated sc
 Last.fm puts the track that plays now on top of the requested number of scrobbles. `lastfm-client` 5.0.0 counted it in this number, so the oldest scrobble of the page was cut while a track played. The fix is in `lastfm-client` 5.1.0: hairball needs this version or a later one.
 
 If you also scrobble to an ATProto app (Rocksky, teal.fm), each listen exists 2 times: in Last.fm and in the ATProto repo. Exclude one of the 2 to count each listen once.
+
+### Bluesky bookmarks
+
+Bookmarks ("Saved posts") are private, and they are not records of the ATProto repo: only `app.bsky.bookmark.getBookmarks`, with a session, returns them. The source is disabled by default (`enabled = false` in `[bsky_bookmarks]`).
+
+1. The CLI finds the PDS of `identifier` (see "ATProto accounts and their PDS"), then logs in there with the app password of `app_password_env` (`com.atproto.server.createSession`).
+2. It reads all the pages of `getBookmarks` (100 per page). The PDS forwards the call to the AppView.
+3. It stores each bookmark in `events`, with the kind `bookmark` and the URI of the saved post as id. The time is the `createdAt` of the bookmark. This field is optional in the lexicon (`app.bsky.bookmark.defs#bookmarkView`): without it, the time is the first time the CLI saw the bookmark.
+4. A stored bookmark that the run did not see was removed: the CLI sets its `deleted_at`.
+5. It closes the session (`deleteSession`).
+
+If the access token expires during the run, the CLI logs in again once, then reads the page again. With `enabled = false`, a sync sends no request: it deletes all the stored bookmarks.
 
 ### Rate limits
 
@@ -292,6 +305,18 @@ cargo run -- sync --source lastfm
 ```
 
 The first run reads the whole history and must show `N inserted`. The second run must show `0 inserted` and `1 unchanged` (the cursor scrobble), and `status` must show the cursor (a unix time) on the `lastfm` line.
+
+The unit tests of the bookmarks adapter use a mock PDS: the pages, a bookmark without `createdAt`, a new login after an expired token, a token that expires again, a removed bookmark and the purge of a disabled source. To test the real API, set `enabled = true` and your handle in `[bsky_bookmarks]`, and `BSKY_APP_PASSWORD` (see "Secrets"). Check the login first, then sync:
+
+```bash
+cargo run -- check
+```
+
+```bash
+cargo run -- sync --source bsky_bookmarks
+```
+
+`check` must show `ok` on the `bsky_bookmarks` line. The sync must show `N inserted`, with N the number of your saved posts. Then set `enabled = false` and sync again: the log must show `bookmarks disabled: purged`, and `status` must show 0 events.
 An unknown source id must stop the command with the list of the configured sources:
 
 ```bash
