@@ -1,14 +1,15 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
 use hairball::{
     check::{self, Endpoints, Status},
     config::Config,
-    db, http,
+    db, export, http,
     sources::{self, Planned, SyncContext, atproto::Atproto},
+    time,
 };
-use jiff::Timestamp;
+use jiff::{Timestamp, civil::Date};
 use sqlx::SqlitePool;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -108,7 +109,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             sync(&config, &db, source.as_deref(), full).await
         }
         Command::Export { year, out } => {
-            bail!("`export` is not implemented yet (year: {year:?}, out: {out:?})")
+            let db = open_db(&config).await?;
+            export(&config, &db, year, out.as_deref()).await
         }
         Command::Status => {
             let db = open_db(&config).await?;
@@ -230,6 +232,44 @@ async fn check(config: &Config) -> anyhow::Result<()> {
     let failed = checks.iter().filter(|c| c.status == Status::Failed).count();
     if failed > 0 {
         bail!("{failed} check(s) failed");
+    }
+    Ok(())
+}
+
+/// Writes the calendar JSON of one year (default: the current year) to `out`,
+/// or to stdout.
+async fn export(
+    config: &Config,
+    db: &SqlitePool,
+    year: Option<i16>,
+    out: Option<&Path>,
+) -> anyhow::Result<()> {
+    let year = year.unwrap_or_else(|| time::day(Timestamp::now(), &config.time_zone).year());
+    let from = Date::new(year, 1, 1).with_context(|| format!("invalid year {year}"))?;
+    let to = Date::new(year, 12, 31).with_context(|| format!("invalid year {year}"))?;
+
+    let calendar = export::build(db, &config.time_zone, &config.timezone, from, to)
+        .await
+        .context("cannot build the calendar")?;
+    let json = serde_json::to_string(&calendar)?;
+
+    match out {
+        None => println!("{json}"),
+        Some(path) => {
+            // Write a temporary file, then rename it: a reader never sees a
+            // half-written file.
+            let tmp = path.with_extension("json.tmp");
+            std::fs::write(&tmp, json)
+                .with_context(|| format!("cannot write {}", tmp.display()))?;
+            std::fs::rename(&tmp, path)
+                .with_context(|| format!("cannot replace {}", path.display()))?;
+            info!(
+                path = %path.display(),
+                days = calendar.days.len(),
+                sources = calendar.sources.len(),
+                "calendar written"
+            );
+        }
     }
     Ok(())
 }

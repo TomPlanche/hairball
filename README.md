@@ -19,7 +19,7 @@ The project is at an early stage.
 - `status` lists the configured sources with their last run, row counts and cursor.
 - `check` tests the secrets and the ATProto identity against the real APIs.
 - `purge` deletes all the events of one kind.
-- `export` returns a "not implemented yet" error.
+- `export` writes the calendar JSON of one year (see "Export").
 
 ## Logs
 
@@ -165,6 +165,49 @@ A PDS limits the number of requests. When it answers HTTP 429, the CLI waits, th
 3. Without these headers: 1, 2, then 4 seconds.
 
 If the wait is longer than 10 minutes, the CLI does not wait: the sync of the source fails, and the next run continues. Each wait is a warning in the log, with the URL and the number of seconds.
+
+## Export
+
+`export` writes the JSON of a GitHub-style heatmap, for one calendar year (default: the current year):
+
+```bash
+cargo run -- export --year 2026 --out calendar.json
+```
+
+Without `--out`, the JSON goes to stdout. With `--out`, the CLI writes a temporary file, then renames it: a web server never reads a half-written file.
+
+```json
+{
+  "timezone": "Europe/Paris",
+  "from": "2026-01-01",
+  "to": "2026-12-31",
+  "sources": {
+    "bluesky": { "label": "Bluesky", "max": 32 },
+    "codeberg": { "label": "Codeberg", "max": 193 }
+  },
+  "days": [
+    { "date": "2026-11-12", "total": 23, "by_source": { "bluesky": 5, "codeberg": 18 } }
+  ]
+}
+```
+
+- `days` contains only the days with activity, in order. The frontend fills the other days with 0.
+- `max` is the highest count of one day for the source. Use it to normalize the intensity of each source: without it, a busy source (Last.fm, many scrobbles per day) hides all the others.
+- The events marked as deleted upstream, and the days with a count of 0, are left out.
+
+The keys of `sources`:
+
+| Data | Key | Label |
+| ---- | --- | ----- |
+| ATProto records | the app of the NSID (see below) | the app name |
+| Last.fm scrobbles | `lastfm` | Last.fm |
+| Bluesky bookmarks | `bookmarks` | Bluesky bookmarks |
+| GitHub | `github` | GitHub |
+| `[[gitea]]` entry | its `name` (for example `codeberg`) | the name, with a capital letter |
+
+`src/registry.rs` groups the ATProto collections by app, with a static table of NSID prefixes: `app.bsky` is Bluesky, `sh.tangled` and `org.tangled` are Tangled, `fm.teal` is teal.fm, etc. An unknown NSID uses its authority (the NSID without its last segment, for example `com.tomplanche.atkuzu`) as key and label. When an app spreads its collections over several sub-namespaces, add its prefix to the table: if not, each sub-namespace is a separate source.
+
+Limit: the events go into the days of `timezone`, but the `daily_counts` days (GitHub, Gitea) come already grouped by their source. GitHub can group them in UTC (open question, see "GitHub"), so a GitHub contribution near midnight can be on the day before or after its day in Paris.
 
 ## Time
 
@@ -330,3 +373,11 @@ cargo run -- check
 ```
 
 Each source with a valid secret must show `ok`. To see a failure, run the command with a wrong value, for example `GITHUB_TOKEN=wrong cargo run -- check`. The `github` line must then show `FAILED` and the HTTP 401, and the command must exit with code 1.
+
+The unit tests of the export use an in-memory database: the grouping per day and per source, the `max` of each source, the day boundary in Paris (also at the end of the year), and the deleted events and days with 0 that are left out. To test it on your database, after a sync:
+
+```bash
+cargo run -- export --year 2026 --out calendar.json
+```
+
+The log must show `calendar written` with the number of days and sources, and `calendar.json` must have one key in `sources` for each app with activity in 2026. No `calendar.json.tmp` file must stay.

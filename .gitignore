@@ -5,3 +5,7 @@
 .env
 *.db
 *.db-journal
+
+# Export output
+/calendar.json
+*.json.tmp
