@@ -79,7 +79,7 @@ impl Atproto {
         let excluded = self
             .exclude
             .iter()
-            .any(|prefix| nsid == prefix || nsid.starts_with(&format!("{prefix}.")));
+            .any(|pattern| exclude_matches(pattern, nsid));
         let toggled_off = match nsid {
             "app.bsky.feed.post" => !self.bluesky.posts,
             "app.bsky.feed.like" => !self.bluesky.likes,
@@ -224,6 +224,42 @@ impl Atproto {
         }
         Ok(db::mark_deleted(ctx.db, SOURCE, &missing, ctx.now.as_second()).await?)
     }
+}
+
+/// Whether an `exclude` entry matches a collection.
+///
+/// - Without `*`, the entry is an NSID or an NSID prefix: `app.bsky.graph`
+///   matches `app.bsky.graph` and `app.bsky.graph.follow`, but not
+///   `app.bsky.graphx`.
+/// - With `*`, the entry is a pattern on the whole NSID, and `*` matches any
+///   characters (none included): `app.rocksky.*` matches every Rocksky
+///   collection, `*.feed.like` matches the likes of every app.
+pub fn exclude_matches(pattern: &str, nsid: &str) -> bool {
+    if pattern.contains('*') {
+        wildcard_matches(pattern, nsid)
+    } else {
+        nsid == pattern || nsid.starts_with(&format!("{pattern}."))
+    }
+}
+
+/// Matches `text` against `pattern`, where `*` matches any characters.
+fn wildcard_matches(pattern: &str, text: &str) -> bool {
+    let parts: Vec<&str> = pattern.split('*').collect();
+    // `split` gives at least one part: `pattern` contains `*`, so at least 2.
+    let (Some(first), Some(last)) = (parts.first(), parts.last()) else {
+        return false;
+    };
+    let Some(mut rest) = text.strip_prefix(first) else {
+        return false;
+    };
+    // The middle parts, in order, each after the previous one.
+    for part in &parts[1..parts.len() - 1] {
+        match rest.find(part) {
+            Some(index) => rest = &rest[index + part.len()..],
+            None => return false,
+        }
+    }
+    rest.ends_with(last)
 }
 
 /// Stores one record as an event. The event time follows [`time::event_time`].
@@ -394,6 +430,40 @@ mod tests {
 
     fn seconds(text: &str) -> i64 {
         text.parse::<Timestamp>().unwrap().as_second()
+    }
+
+    #[test]
+    fn wildcards_match_the_whole_nsid() {
+        // Every collection of one app.
+        assert!(exclude_matches("app.rocksky.*", "app.rocksky.scrobble"));
+        assert!(exclude_matches(
+            "app.rocksky.*",
+            "app.rocksky.actor.profile"
+        ));
+        assert!(!exclude_matches("app.rocksky.*", "app.rockskyx.scrobble"));
+        assert!(!exclude_matches("app.rocksky.*", "fm.teal.feed.play"));
+        // One collection name in every app.
+        assert!(exclude_matches("*.feed.like", "app.bsky.feed.like"));
+        assert!(exclude_matches("*.feed.like", "dev.npmx.feed.like"));
+        assert!(!exclude_matches("*.feed.like", "app.bsky.feed.likes"));
+        // Several wildcards, in order.
+        assert!(exclude_matches(
+            "app.*.actor.*",
+            "app.rocksky.actor.profile"
+        ));
+        assert!(!exclude_matches("app.*.actor.*", "app.bsky.feed.post"));
+        assert!(exclude_matches("*", "anything.at.all"));
+        // A pattern is not a prefix: it must match up to the end.
+        assert!(!exclude_matches("app.*.feed", "app.bsky.feed.post"));
+        // The first and the last part cannot overlap.
+        assert!(!exclude_matches("a*a", "a"));
+    }
+
+    #[test]
+    fn entries_without_wildcard_stay_prefixes() {
+        assert!(exclude_matches("app.rocksky", "app.rocksky.song"));
+        assert!(exclude_matches("app.rocksky.song", "app.rocksky.song"));
+        assert!(!exclude_matches("app.rocksky", "app.rockskyx.song"));
     }
 
     #[test]

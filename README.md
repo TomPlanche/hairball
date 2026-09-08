@@ -96,6 +96,16 @@ Only a full run sees all the records. After a full run that read every collectio
 
 A kind that the config no longer wants (in `exclude`, or a `[atproto.bluesky]` toggle set to `false`) is not only skipped: at the start of the next sync, the CLI deletes all its rows. The database then contains only what the config enables.
 
+An `exclude` entry has 2 forms:
+
+| Entry | Matches | Does not match |
+| ----- | ------- | -------------- |
+| `app.bsky.graph` (no `*`): an NSID or an NSID prefix | `app.bsky.graph`, `app.bsky.graph.follow` | `app.bsky.graphx.follow` |
+| `app.rocksky.*`: a pattern, `*` matches any characters | `app.rocksky.scrobble`, `app.rocksky.actor.profile` | `app.rockskyx.scrobble` |
+| `*.feed.like` | `app.bsky.feed.like`, `dev.npmx.feed.like` | `app.bsky.feed.likes` |
+
+A pattern must match the whole NSID: `app.*.feed` does not match `app.bsky.feed.post`. Use `app.*.feed.*` for that.
+
 To delete the rows of one kind by hand, use `purge`:
 
 ```bash
