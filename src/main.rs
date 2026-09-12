@@ -1,4 +1,9 @@
-use std::path::{Path, PathBuf};
+use std::{
+    io::{self, IsTerminal},
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
@@ -6,9 +11,11 @@ use hairball::{
     check::{self, Endpoints, Status},
     config::Config,
     db, export, http,
+    progress::{self, Progress},
     sources::{self, Planned, SyncContext, atproto::Atproto},
     time,
 };
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use jiff::{Timestamp, civil::Date};
 use sqlx::SqlitePool;
 use tracing::{error, info, warn};
@@ -68,13 +75,16 @@ fn main() -> anyhow::Result<()> {
     // Load `.env` before the runtime starts: setting environment variables is
     // only safe while the process has a single thread.
     load_dotenv()?;
-    init_logs();
+
+    // Progress bars only in a terminal: not under systemd, not in a pipe.
+    let bars = std::io::stderr().is_terminal().then(MultiProgress::new);
+    init_logs(bars.clone());
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("cannot start the async runtime")?
-        .block_on(run(Cli::parse()))
+        .block_on(run(Cli::parse(), bars))
 }
 
 /// Reads `.env` (in the current directory or a parent), if it exists.
@@ -91,22 +101,100 @@ fn load_dotenv() -> anyhow::Result<()> {
 
 /// Logs go to stderr, so that `export` can write JSON to stdout.
 /// `RUST_LOG` sets the level (default: `info`), for example `RUST_LOG=hairball=debug`.
-fn init_logs() {
+fn init_logs(bars: Option<MultiProgress>) {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_writer(std::io::stderr)
+        .with_writer(move || LogWriter { bars: bars.clone() })
         .init();
 }
 
-async fn run(cli: Cli) -> anyhow::Result<()> {
+/// Writes the logs to stderr. With progress bars, it hides them during the
+/// write, so that a log line never mixes with a bar.
+struct LogWriter {
+    bars: Option<MultiProgress>,
+}
+
+impl io::Write for LogWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match &self.bars {
+            Some(bars) => bars.suspend(|| io::stderr().write(buf)),
+            None => io::stderr().write(buf),
+        }
+    }
+
+    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+        match &self.bars {
+            Some(bars) => bars.suspend(|| io::stderr().write_all(buf)),
+            None => io::stderr().write_all(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        io::stderr().flush()
+    }
+}
+
+/// Draws the progress of one source as a bar (known length) or a spinner.
+#[derive(Debug)]
+struct BarProgress {
+    bar: ProgressBar,
+}
+
+impl BarProgress {
+    fn new(bars: &MultiProgress, id: &str) -> Self {
+        let bar = bars.add(ProgressBar::new_spinner());
+        bar.set_prefix(id.to_owned());
+        bar.set_style(Self::spinner_style());
+        bar.enable_steady_tick(Duration::from_millis(120));
+        Self { bar }
+    }
+
+    fn spinner_style() -> ProgressStyle {
+        ProgressStyle::with_template("{spinner} {prefix:.bold} [{elapsed}] {msg}")
+            .unwrap_or_else(|_| ProgressStyle::default_spinner())
+    }
+
+    fn bar_style() -> ProgressStyle {
+        ProgressStyle::with_template(
+            "{spinner} {prefix:.bold} [{elapsed}] [{bar:30}] {pos}/{len} {msg}",
+        )
+        .unwrap_or_else(|_| ProgressStyle::default_bar())
+        .progress_chars("=> ")
+    }
+}
+
+impl Progress for BarProgress {
+    fn set_length(&self, length: Option<u64>) {
+        match length {
+            Some(length) => {
+                self.bar.set_length(length);
+                self.bar.set_style(Self::bar_style());
+            }
+            None => {
+                self.bar.unset_length();
+                self.bar.set_style(Self::spinner_style());
+            }
+        }
+    }
+
+    fn set_position(&self, position: u64) {
+        self.bar.set_position(position);
+    }
+
+    fn set_message(&self, message: String) {
+        self.bar.set_message(message);
+    }
+}
+
+async fn run(cli: Cli, bars: Option<MultiProgress>) -> anyhow::Result<()> {
     let config = Config::load(&cli.config)
         .with_context(|| format!("cannot load the config file {}", cli.config.display()))?;
 
     match cli.command {
         Command::Sync { source, full } => {
             let db = open_db(&config).await?;
-            sync(&config, &db, source.as_deref(), full).await
+            sync(&config, &db, source.as_deref(), full, bars.as_ref()).await
         }
         Command::Export { year, out } => {
             let db = open_db(&config).await?;
@@ -149,6 +237,7 @@ async fn sync(
     db: &SqlitePool,
     only: Option<&str>,
     full: bool,
+    bars: Option<&MultiProgress>,
 ) -> anyhow::Result<()> {
     let mut planned = sources::plan(config);
     if let Some(only) = only {
@@ -163,12 +252,7 @@ async fn sync(
     }
 
     let client = http::client().context("cannot build the HTTP client")?;
-    let ctx = SyncContext {
-        db,
-        client: &client,
-        now: Timestamp::now(),
-        full,
-    };
+    let now = Timestamp::now();
 
     let mut failed = Vec::new();
     for planned in &planned {
@@ -177,7 +261,24 @@ async fn sync(
             Planned::Run(source) => {
                 let id = source.id();
                 info!(source = %id, full, "sync started");
-                match source.sync(&ctx).await {
+                let bar = bars.map(|bars| Arc::new(BarProgress::new(bars, &id)));
+                let progress: Arc<dyn Progress> = match &bar {
+                    Some(bar) => Arc::clone(bar) as Arc<dyn Progress>,
+                    None => progress::none(),
+                };
+                let ctx = SyncContext {
+                    db,
+                    client: &client,
+                    now,
+                    full,
+                    progress: &progress,
+                };
+                let result = source.sync(&ctx).await;
+                // The log line below keeps the result: the bar can go.
+                if let Some(bar) = &bar {
+                    bar.bar.finish_and_clear();
+                }
+                match result {
                     Ok(report) => info!(source = %id, "sync done: {report}"),
                     Err(e) => {
                         error!(source = %id, "sync failed: {}", error_chain(&e));

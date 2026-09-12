@@ -9,14 +9,14 @@ pub mod gitea;
 pub mod github;
 pub mod lastfm;
 
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 use jiff::Timestamp;
 use reqwest::{Client, Response, StatusCode};
 use serde::Deserialize;
 use sqlx::SqlitePool;
 
-use crate::{config::Config, db, db::DbError, identity::IdentityError};
+use crate::{config::Config, db, db::DbError, identity::IdentityError, progress::Progress};
 
 /// What a sync needs: the database, the HTTP client and the run options.
 #[derive(Debug, Clone, Copy)]
@@ -27,6 +27,9 @@ pub struct SyncContext<'a> {
     pub now: Timestamp,
     /// Ignore the cursors and reconcile deletions.
     pub full: bool,
+    /// Receives the progress of the source. An `Arc`, because a callback of
+    /// `lastfm-client` must own it.
+    pub progress: &'a Arc<dyn Progress>,
 }
 
 /// The counts of one sync.

@@ -61,6 +61,9 @@ impl Gitea {
         let id = self.id();
         let url = format!("{}/api/v1/users/{}/heatmap", self.url, self.user);
 
+        // One request: no length, only an activity indicator.
+        ctx.progress.set_length(None);
+        ctx.progress.set_message("heatmap".to_owned());
         // No `Authorization` header, on purpose: see the module documentation.
         let response = http::send_with_retry(ctx.client.get(&url)).await?;
         if !response.status().is_success() {
@@ -144,11 +147,13 @@ mod tests {
 
     async fn sync(gitea: &Gitea, db: &SqlitePool) -> Result<SyncReport, SourceError> {
         let client = http::client().unwrap();
+        let progress = crate::progress::none();
         let ctx = SyncContext {
             db,
             client: &client,
             now: "2026-11-12T12:00:00Z".parse().unwrap(),
             full: false,
+            progress: &progress,
         };
         gitea.sync(&ctx).await
     }

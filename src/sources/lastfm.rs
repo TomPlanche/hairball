@@ -54,6 +54,13 @@ impl Lastfm {
             // unchanged. It is safer than a gap.
             request = request.since(cursor);
         }
+        // The crate reports `(fetched, total)` after each batch of scrobbles.
+        let progress = Arc::clone(ctx.progress);
+        progress.set_message("scrobbles".to_owned());
+        let request = request.on_progress(move |fetched, total| {
+            progress.set_length(Some(u64::from(total)));
+            progress.set_position(u64::from(fetched));
+        });
         let tracks: Vec<RecentTrack> = request.fetch().await?.into();
         debug!(tracks = tracks.len(), ?cursor, "recent tracks read");
 
@@ -223,11 +230,13 @@ mod tests {
 
     async fn sync(lastfm: &Lastfm, db: &SqlitePool, full: bool) -> Result<SyncReport, SourceError> {
         let client = http::client().unwrap();
+        let progress = crate::progress::none();
         let ctx = SyncContext {
             db,
             client: &client,
             now: "2026-11-12T12:00:00Z".parse().unwrap(),
             full,
+            progress: &progress,
         };
         lastfm.sync(&ctx).await
     }

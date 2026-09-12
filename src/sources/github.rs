@@ -128,7 +128,12 @@ impl Github {
         };
 
         let mut report = SyncReport::default();
-        for year in start_year..=now_year {
+        // One progress step per year.
+        ctx.progress
+            .set_length(Some(u64::try_from(now_year - start_year + 1).unwrap_or(0)));
+        for (done, year) in (start_year..=now_year).enumerate() {
+            ctx.progress.set_position(done as u64);
+            ctx.progress.set_message(year.to_string());
             let (from, to) = year_range(year, created.created_at, ctx.now);
             let data: Contributions = self
                 .query(
@@ -292,11 +297,13 @@ mod tests {
 
     async fn sync(github: &Github, db: &SqlitePool, full: bool) -> Result<SyncReport, SourceError> {
         let client = http::client().unwrap();
+        let progress = crate::progress::none();
         let ctx = SyncContext {
             db,
             client: &client,
             now: NOW.parse().unwrap(),
             full,
+            progress: &progress,
         };
         github.sync(&ctx).await
     }

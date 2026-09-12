@@ -31,6 +31,25 @@ RUST_LOG=hairball=debug cargo run -- sync
 
 With `debug`, the ATProto adapter logs each collection it reads or skips. A rejected event time (for example a `createdAt` in the future) is a warning, with the URI of the record.
 
+## Progress
+
+In a terminal, `sync` shows one progress bar per source, under the logs. It helps most for a long run such as `sync --full`:
+
+```
+⠄ atproto [5s] [========>                     ] 18/62 dev.npmx.feed.like: 2 records
+⠒ github [0s] [                              ] 0/8 2019
+⠁ lastfm [0s] scrobbles
+```
+
+| Source | Steps of the bar | Message |
+| ------ | ---------------- | ------- |
+| `atproto` | the collections to read | the collection, and the records read in it |
+| `github` | the years to read | the year |
+| `lastfm` | the scrobbles (total given by Last.fm) | `scrobbles` |
+| `gitea:<name>`, `bsky_bookmarks` | unknown: a spinner only | `heatmap`, or the bookmarks read |
+
+A bar disappears when its source is done: the `sync done` log line keeps the result. Without a terminal (systemd, a pipe, a file), there is no bar: the logs stay plain lines. The bars also need the `TERM` environment variable, which every terminal sets.
+
 ## Requirements
 
 - Rust 1.85 or later (edition 2024).
@@ -391,3 +410,11 @@ cargo run -- export --year 2026 --out calendar.json
 ```
 
 The log must show `calendar written` with the number of days and sources, and `calendar.json` must have one key in `sources` for each app with activity in 2026. No `calendar.json.tmp` file must stay.
+
+The unit tests check the progress of the ATProto adapter (one step per wanted collection, and the messages). To see the bars, run a full sync in a terminal:
+
+```bash
+cargo run --release -- sync --full
+```
+
+Each source must show a bar or a spinner while it runs, then its `sync done` line. With `cargo run -- sync --full 2> sync.log`, `sync.log` must contain only log lines, without any bar.

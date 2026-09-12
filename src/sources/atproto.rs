@@ -108,11 +108,19 @@ impl Atproto {
 
         // The URIs seen upstream. Only a full run sees all of them.
         let mut seen = HashSet::new();
-        for nsid in &description.collections {
-            if !self.wants(nsid) {
-                debug!(%nsid, "collection skipped by the config");
-                continue;
-            }
+        let (wanted, skipped): (Vec<&String>, Vec<&String>) = description
+            .collections
+            .iter()
+            .partition(|nsid| self.wants(nsid));
+        for nsid in skipped {
+            debug!(%nsid, "collection skipped by the config");
+        }
+
+        // One progress step per collection.
+        ctx.progress.set_length(Some(wanted.len() as u64));
+        for (done, nsid) in wanted.into_iter().enumerate() {
+            ctx.progress.set_position(done as u64);
+            ctx.progress.set_message(nsid.clone());
             let before = report;
             self.sync_collection(
                 ctx,
@@ -161,6 +169,7 @@ impl Atproto {
         let url = format!("{pds}/xrpc/com.atproto.repo.listRecords");
         let mut cursor: Option<String> = None;
         let mut pages = 0;
+        let mut records = 0;
 
         loop {
             let mut query = vec![("repo", did), ("collection", nsid), ("limit", PAGE_SIZE)];
@@ -169,6 +178,9 @@ impl Atproto {
             }
             let page: RecordPage = xrpc_get(ctx.client, &url, &query).await?;
             pages += 1;
+            records += page.records.len();
+            ctx.progress
+                .set_message(format!("{nsid}: {records} records"));
 
             let mut all_known = true;
             for record in &page.records {
@@ -313,6 +325,8 @@ async fn xrpc_get<T: DeserializeOwned>(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use serde_json::json;
     use sqlx::SqlitePool;
     use wiremock::{
@@ -412,11 +426,13 @@ mod tests {
         full: bool,
     ) -> Result<SyncReport, SourceError> {
         let client = http::client().unwrap();
+        let progress = crate::progress::none();
         let ctx = SyncContext {
             db,
             client: &client,
             now: now.parse().unwrap(),
             full,
+            progress: &progress,
         };
         adapter.sync(&ctx).await
     }
@@ -484,6 +500,57 @@ mod tests {
         // A prefix stops at a dot: `app.bsky.graphx` is another authority.
         assert!(server_less.wants("app.bsky.graphx.thing"));
         assert!(server_less.wants("sh.tangled.repo"));
+    }
+
+    /// Records every progress call, as text.
+    #[derive(Debug, Default)]
+    struct Recorder(std::sync::Mutex<Vec<String>>);
+
+    impl crate::progress::Progress for Recorder {
+        fn set_length(&self, length: Option<u64>) {
+            self.0.lock().unwrap().push(format!("length {length:?}"));
+        }
+        fn set_position(&self, position: u64) {
+            self.0.lock().unwrap().push(format!("position {position}"));
+        }
+        fn set_message(&self, message: String) {
+            self.0.lock().unwrap().push(format!("message {message}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn progress_has_one_step_per_wanted_collection() {
+        let server = MockServer::start().await;
+        mount_account(&server, &["app.bsky.feed.post", "app.bsky.graph.follow"]).await;
+        mount_two_pages(&server, 1).await;
+        let db = db::open_in_memory().await.unwrap();
+        let recorder = Arc::new(Recorder::default());
+        let progress: Arc<dyn crate::progress::Progress> = Arc::clone(&recorder) as _;
+        let client = http::client().unwrap();
+        let ctx = SyncContext {
+            db: &db,
+            client: &client,
+            now: "2026-11-12T12:00:00Z".parse().unwrap(),
+            full: false,
+            progress: &progress,
+        };
+
+        adapter(&server, "exclude = [\"app.bsky.graph\"]")
+            .sync(&ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *recorder.0.lock().unwrap(),
+            [
+                // `app.bsky.graph.follow` is excluded: 1 collection only.
+                "length Some(1)",
+                "position 0",
+                "message app.bsky.feed.post",
+                "message app.bsky.feed.post: 2 records",
+                "message app.bsky.feed.post: 3 records",
+            ]
+        );
     }
 
     #[tokio::test]

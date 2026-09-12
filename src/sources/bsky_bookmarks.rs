@@ -104,6 +104,7 @@ impl BskyBookmarks {
         let mut seen = HashSet::new();
         let mut cursor: Option<String> = None;
         let mut relogged = false;
+        ctx.progress.set_length(None);
         loop {
             let page = match self.page(ctx, &pds, &session, cursor.as_deref()).await? {
                 PageResult::Page(page) => page,
@@ -127,6 +128,9 @@ impl BskyBookmarks {
                     seen.insert(uri);
                 }
             }
+            // The total is unknown: only the count so far.
+            ctx.progress
+                .set_message(format!("{} bookmarks", seen.len()));
             match page.cursor {
                 Some(next) if !page.bookmarks.is_empty() => cursor = Some(next),
                 _ => break,
@@ -383,11 +387,13 @@ mod tests {
 
     async fn sync(adapter: &BskyBookmarks, db: &SqlitePool) -> Result<SyncReport, SourceError> {
         let client = http::client().unwrap();
+        let progress = crate::progress::none();
         let ctx = SyncContext {
             db,
             client: &client,
             now: NOW.parse().unwrap(),
             full: false,
+            progress: &progress,
         };
         adapter.sync(&ctx).await
     }
