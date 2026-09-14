@@ -296,6 +296,105 @@ Each ATProto account lives on one PDS (Personal Data Server), with its own URL: 
 
 The CLI then sends all ATProto calls to this PDS: the login of the app password, and later the reads of the records.
 
+## Deployment
+
+On a Linux server with systemd, 2 timers run the CLI. The units are in `deploy/systemd/`:
+
+| Unit | When | What |
+| ---- | ---- | ---- |
+| `hairball-sync.timer` | every hour, at minute 5 | starts `hairball-sync.service` |
+| `hairball-sync.service` | | `sync` (incremental), then `export` |
+| `hairball-sync-full.timer` | every night, at 03:30 | starts `hairball-sync-full.service` |
+| `hairball-sync-full.service` | | `sync --full`, then `export` |
+
+The paths in the units:
+
+| Path | Content | Owner, mode |
+| ---- | ------- | ----------- |
+| `/usr/local/bin/hairball` | the binary | `root`, `0755` |
+| `/etc/hairball/config.toml` | the config | `root:hairball`, `0640` |
+| `/etc/hairball/secrets.env` | the secrets | `root:root`, `0600` |
+| `/var/lib/hairball/` | the database (systemd creates it) | `hairball` |
+| `/srv/hairball/calendar.json` | the export, for the web server | `hairball` |
+
+Some choices:
+
+- The 2 services take the same lock (`flock /run/lock/hairball.lock`): if the hourly sync starts during the nightly sync, it waits. They write to the same SQLite file.
+- The export runs in `ExecStopPost`, not in `ExecStartPost`: it runs even if a source failed. `sync` then exits with code 1, and the other sources still have new data.
+- systemd reads `secrets.env` as root before it starts the service: the file stays `root:root 0600`, and the `hairball` user never reads it.
+- The working directory is `/var/lib/hairball`: the CLI must not find a `.env` there.
+- The services run as the system user `hairball`, in a sandbox: the file system is read-only, except the state directory, `/srv/hairball` and the lock.
+
+### Install
+
+1. Install the build tools, and build the binary on the server. `lastfm-client` 5.1.0 uses OpenSSL on Linux: the build needs `pkg-config` and `libssl-dev`. The time zones need `tzdata`.
+
+   ```bash
+   sudo apt install build-essential pkg-config libssl-dev tzdata
+   ```
+
+   ```bash
+   cargo build --release && sudo install -m 0755 target/release/hairball /usr/local/bin/hairball
+   ```
+
+2. Create the system user, and the export directory. Give the web server read access to this directory (for example with the group `www-data`).
+
+   ```bash
+   sudo useradd --system --no-create-home --shell /usr/sbin/nologin hairball
+   ```
+
+   ```bash
+   sudo install -d -o hairball -g www-data -m 0750 /srv/hairball
+   ```
+
+3. Write the config and the secrets. In the config, the database must have an absolute path: `database = "/var/lib/hairball/hairball.db"`.
+
+   ```bash
+   sudo install -d -m 0755 /etc/hairball
+   ```
+
+   ```bash
+   sudo install -o root -g hairball -m 0640 config.toml /etc/hairball/config.toml
+   ```
+
+   ```bash
+   sudo install -o root -g root -m 0600 .env /etc/hairball/secrets.env
+   ```
+
+4. Install and check the units:
+
+   ```bash
+   sudo cp deploy/systemd/hairball-sync* /etc/systemd/system/ && sudo systemd-analyze verify /etc/systemd/system/hairball-sync*.service /etc/systemd/system/hairball-sync*.timer
+   ```
+
+5. Run the first full sync by hand (the backfill), and follow its log:
+
+   ```bash
+   sudo systemctl daemon-reload && sudo systemctl start hairball-sync-full.service
+   ```
+
+   ```bash
+   journalctl -u hairball-sync-full.service -e
+   ```
+
+6. Check the secrets with the config and the environment of the service, then enable the timers. `systemd-run` reads `secrets.env` like the service: the secrets never appear in a command line.
+
+   ```bash
+   sudo systemd-run --uid=hairball --gid=hairball -p EnvironmentFile=/etc/hairball/secrets.env -p WorkingDirectory=/var/lib/hairball --pipe --wait /usr/local/bin/hairball --config /etc/hairball/config.toml check
+   ```
+
+   ```bash
+   sudo systemctl enable --now hairball-sync.timer hairball-sync-full.timer
+   ```
+
+### Operate
+
+- Next runs: `systemctl list-timers 'hairball*'`.
+- Logs: `journalctl -u hairball-sync.service -e`. There is no progress bar under systemd: only log lines.
+- State of each source: `sudo -u hairball /usr/local/bin/hairball --config /etc/hairball/config.toml status`.
+- Update: build the new binary, then install it again (step 1). The next run applies the new migrations of the database by itself.
+- Backup: copy `/var/lib/hairball/hairball.db` while no sync runs, for example with `flock /run/lock/hairball.lock cp ...`.
+
 ## Test
 
 Run the checks:
@@ -418,3 +517,5 @@ cargo run --release -- sync --full
 ```
 
 Each source must show a bar or a spinner while it runs, then its `sync done` line. With `cargo run -- sync --full 2> sync.log`, `sync.log` must contain only log lines, without any bar.
+
+The systemd units have no automatic test here: check them on the server with `systemd-analyze verify` (step 4 of "Install"). After the first full sync (step 5), `journalctl` must show one `sync done` or `sync failed` line per source, then `calendar written`, and `/srv/hairball/calendar.json` must exist. `systemctl list-timers 'hairball*'` must show the 2 timers.

@@ -1,0 +1,13 @@
+[Unit]
+Description=hairball: incremental sync every hour
+
+[Timer]
+# At minute 5 of each hour: away from the nightly full sync at 03:30.
+OnCalendar=*-*-* *:05:00
+# Spread the load on the APIs a little.
+RandomizedDelaySec=2min
+# After a shutdown, run once at boot if a run was missed.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

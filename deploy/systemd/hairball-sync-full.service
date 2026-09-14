@@ -1,0 +1,34 @@
+# Nightly full sync: reads everything again, marks the deletions upstream,
+# then the calendar export. Started by hairball-sync-full.timer.
+
+[Unit]
+Description=hairball: full sync and calendar export
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=hairball
+Group=hairball
+StateDirectory=hairball
+WorkingDirectory=/var/lib/hairball
+EnvironmentFile=/etc/hairball/secrets.env
+ExecStart=/usr/bin/flock /run/lock/hairball.lock /usr/local/bin/hairball --config /etc/hairball/config.toml sync --full
+ExecStopPost=/usr/local/bin/hairball --config /etc/hairball/config.toml export --out /srv/hairball/calendar.json
+# A full run reads every page: give it time, but not forever.
+TimeoutStartSec=1h
+
+ReadWritePaths=/srv/hairball /run/lock
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
