@@ -33,6 +33,17 @@ pub struct Config {
 
     pub github: Option<GithubConfig>,
     pub lastfm: Option<LastfmConfig>,
+
+    #[serde(default)]
+    pub export: ExportConfig,
+}
+
+/// Options of the `export` command.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExportConfig {
+    /// The file to write. `--out` wins over it. Without both: stdout.
+    pub out: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -213,6 +224,9 @@ impl Config {
     /// Records all validation errors at once in `v`.
     fn validate(&self, v: &mut Validator) {
         v.non_empty("database", &self.database.to_string_lossy());
+        if let Some(out) = &self.export.out {
+            v.non_empty("export.out", &out.to_string_lossy());
+        }
 
         if let Some(atproto) = &self.atproto {
             v.non_empty("atproto.handle", &atproto.handle);
@@ -480,6 +494,33 @@ mod tests {
             config.atproto.unwrap().oldest_time(),
             Some("2022-01-01T00:00:00Z".parse().unwrap())
         );
+    }
+
+    #[test]
+    fn export_goes_to_stdout_by_default() {
+        assert_eq!(Config::parse("").unwrap().export.out, None);
+    }
+
+    #[test]
+    fn export_file_comes_from_the_config() {
+        let config = Config::parse("[export]\nout = \"/srv/hairball/calendar.json\"").unwrap();
+
+        assert_eq!(
+            config.export.out,
+            Some(PathBuf::from("/srv/hairball/calendar.json"))
+        );
+    }
+
+    #[test]
+    fn empty_export_file_is_rejected() {
+        assert_eq!(
+            issues("[export]\nout = \"\""),
+            ["export.out: must not be empty"]
+        );
+        assert!(matches!(
+            Config::parse("[export]\npath = \"x.json\""),
+            Err(ConfigError::Parse(_))
+        ));
     }
 
     #[test]

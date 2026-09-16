@@ -20,7 +20,8 @@ EnvironmentFile=/etc/hairball/secrets.env
 # they write to the same SQLite file.
 ExecStart=/usr/bin/flock /run/lock/hairball.lock /usr/local/bin/hairball --config /etc/hairball/config.toml sync
 # After the sync, even if a source failed: the other sources have new data.
-ExecStopPost=/usr/local/bin/hairball --config /etc/hairball/config.toml export --out /srv/hairball/calendar.json
+# The file comes from `out` in `[export]` of the config.
+ExecStopPost=/usr/local/bin/hairball --config /etc/hairball/config.toml export
 
 # Sandbox: the service reads its config, writes its state and the export.
 ReadWritePaths=/srv/hairball /run/lock

@@ -52,7 +52,7 @@ enum Command {
         #[arg(long)]
         year: Option<i16>,
 
-        /// Output file (default: stdout).
+        /// Output file. Wins over `out` in `[export]`. Without both: stdout.
         #[arg(long)]
         out: Option<PathBuf>,
     },
@@ -198,6 +198,8 @@ async fn run(cli: Cli, bars: Option<MultiProgress>) -> anyhow::Result<()> {
         }
         Command::Export { year, out } => {
             let db = open_db(&config).await?;
+            // `--out` wins over the config: useful for a test by hand.
+            let out = out.or_else(|| config.export.out.clone());
             export(&config, &db, year, out.as_deref()).await
         }
         Command::Status => {

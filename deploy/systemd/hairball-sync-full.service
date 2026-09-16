@@ -14,7 +14,7 @@ StateDirectory=hairball
 WorkingDirectory=/var/lib/hairball
 EnvironmentFile=/etc/hairball/secrets.env
 ExecStart=/usr/bin/flock /run/lock/hairball.lock /usr/local/bin/hairball --config /etc/hairball/config.toml sync --full
-ExecStopPost=/usr/local/bin/hairball --config /etc/hairball/config.toml export --out /srv/hairball/calendar.json
+ExecStopPost=/usr/local/bin/hairball --config /etc/hairball/config.toml export
 # A full run reads every page: give it time, but not forever.
 TimeoutStartSec=1h
 

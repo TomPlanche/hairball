@@ -5,6 +5,11 @@
 timezone = "Europe/Paris"
 database = "hairball.db"
 
+# Where `export` writes the calendar JSON. `--out` wins over it.
+# Without both, the JSON goes to stdout. On a server, use an absolute path.
+[export]
+out = "calendar.json"
+
 # ATProto: no credentials. The CLI reads the public records of the repo.
 [atproto]
 handle = "tomplanche.com"           # or a DID

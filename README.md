@@ -69,7 +69,8 @@ hairball [--config <path>] <command>
 
   sync [--source <id>] [--full]   Run all enabled sources, or only one.
   export [--year <YYYY>] [--out <path>]
-                                  Write the calendar JSON (default: stdout).
+                                  Write the calendar JSON (default: `out` in
+                                  `[export]`, else stdout).
   status                          Show each source: last run, cursor and row counts.
   check                           Check that the secrets are set, valid and accepted.
   purge --kind <kind>             Delete all rows of one kind.
@@ -203,7 +204,19 @@ If the wait is longer than 10 minutes, the CLI does not wait: the sync of the so
 cargo run -- export --year 2026 --out calendar.json
 ```
 
-Without `--out`, the JSON goes to stdout. With `--out`, the CLI writes a temporary file, then renames it: a web server never reads a half-written file.
+The destination comes from, in this order:
+
+1. `--out <path>` on the command line (useful for a test by hand).
+2. `out` in the `[export]` section of the config:
+
+   ```toml
+   [export]
+   out = "/srv/hairball/calendar.json"
+   ```
+
+3. Else, stdout.
+
+The destination is not a secret: it goes in the config, not in `.env`. For a file, the CLI writes a temporary file, then renames it: a web server never reads a half-written file.
 
 ```json
 {
@@ -347,7 +360,14 @@ Some choices:
    sudo install -d -o hairball -g www-data -m 0750 /srv/hairball
    ```
 
-3. Write the config and the secrets. In the config, the database must have an absolute path: `database = "/var/lib/hairball/hairball.db"`.
+3. Write the config and the secrets. In the config, the database and the export need absolute paths: the units run the CLI without `--out`, so the export goes to `out` in `[export]`.
+
+   ```toml
+   database = "/var/lib/hairball/hairball.db"
+
+   [export]
+   out = "/srv/hairball/calendar.json"
+   ```
 
    ```bash
    sudo install -d -m 0755 /etc/hairball
@@ -509,6 +529,8 @@ cargo run -- export --year 2026 --out calendar.json
 ```
 
 The log must show `calendar written` with the number of days and sources, and `calendar.json` must have one key in `sources` for each app with activity in 2026. No `calendar.json.tmp` file must stay.
+
+To check the order of the destinations, set `out = "from-config.json"` in `[export]`, then run `export` without `--out`: the log must show `path=from-config.json`. With `--out other.json`, the log must show `path=other.json`. Without `[export]` and without `--out`, the JSON must go to stdout.
 
 The unit tests check the progress of the ATProto adapter (one step per wanted collection, and the messages). To see the bars, run a full sync in a terminal:
 
