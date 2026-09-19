@@ -73,6 +73,29 @@ pub async fn open(path: &Path) -> Result<SqlitePool, DbError> {
     Ok(pool)
 }
 
+/// Copies the database `source` to `copy` (a new file), then opens the copy
+/// and runs the migrations on it. The source is opened read-only and is never
+/// changed, even by a pending migration. If `source` does not exist, the copy
+/// starts empty. For a dry run: the run writes to the copy only.
+pub async fn open_copy(source: &Path, copy: &Path) -> Result<SqlitePool, DbError> {
+    if source.exists() {
+        let options = SqliteConnectOptions::new().filename(source).read_only(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .map_err(DbError::Open)?;
+        // `VACUUM INTO` writes a consistent copy, even while another process
+        // writes to the source.
+        sqlx::query("VACUUM INTO ?1")
+            .bind(copy.to_string_lossy().into_owned())
+            .execute(&pool)
+            .await?;
+        pool.close().await;
+    }
+    open(copy).await
+}
+
 /// Opens a new empty in-memory database, for tests.
 pub async fn open_in_memory() -> Result<SqlitePool, DbError> {
     let options = SqliteConnectOptions::from_str("sqlite::memory:").map_err(DbError::Open)?;
@@ -260,6 +283,17 @@ pub async fn purge_kind(db: &SqlitePool, source: Option<&str>, kind: &str) -> Re
         .execute(db)
         .await?;
     Ok(result.rows_affected())
+}
+
+/// Counts the events of one kind, like [`purge_kind`] would delete them.
+pub async fn count_kind(db: &SqlitePool, source: Option<&str>, kind: &str) -> Result<i64, DbError> {
+    Ok(sqlx::query_scalar(
+        "SELECT COUNT(*) FROM events WHERE kind = ?1 AND (?2 IS NULL OR source = ?2)",
+    )
+    .bind(kind)
+    .bind(source)
+    .fetch_one(db)
+    .await?)
 }
 
 /// The ids of the events of a source that are not marked as deleted.
@@ -507,6 +541,76 @@ mod tests {
         assert_eq!(
             source_stats(&db, "atproto").await.unwrap(),
             SourceStats::default()
+        );
+    }
+
+    fn temp_path(name: &str) -> std::path::PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("hairball-test-{}-{name}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+
+    #[tokio::test]
+    async fn writes_to_a_copy_do_not_change_the_source() {
+        let source = temp_path("copy-source");
+        let copy = temp_path("copy-target");
+        let db = open(&source).await.unwrap();
+        upsert_event(&db, &post("{}"), NOW).await.unwrap();
+        db.close().await;
+
+        let copied = open_copy(&source, &copy).await.unwrap();
+        // The copy has the rows of the source.
+        assert_eq!(source_stats(&copied, "atproto").await.unwrap().events, 1);
+        purge_kind(&copied, None, "app.bsky.feed.post")
+            .await
+            .unwrap();
+        assert_eq!(source_stats(&copied, "atproto").await.unwrap().events, 0);
+        copied.close().await;
+
+        // The source still has its row.
+        let db = open(&source).await.unwrap();
+        assert_eq!(source_stats(&db, "atproto").await.unwrap().events, 1);
+        db.close().await;
+        std::fs::remove_file(&source).unwrap();
+        std::fs::remove_file(&copy).unwrap();
+    }
+
+    #[tokio::test]
+    async fn copy_of_a_missing_database_starts_empty() {
+        let source = temp_path("missing-source");
+        let copy = temp_path("missing-target");
+
+        let copied = open_copy(&source, &copy).await.unwrap();
+
+        assert_eq!(
+            source_stats(&copied, "atproto").await.unwrap(),
+            SourceStats::default()
+        );
+        assert!(!source.exists());
+        copied.close().await;
+        std::fs::remove_file(&copy).unwrap();
+    }
+
+    #[tokio::test]
+    async fn count_kind_matches_what_purge_deletes() {
+        let db = open_in_memory().await.unwrap();
+        insert(&db, "atproto", "app.bsky.feed.like", "like-1").await;
+        insert(&db, "other", "app.bsky.feed.like", "like-2").await;
+
+        assert_eq!(
+            count_kind(&db, None, "app.bsky.feed.like").await.unwrap(),
+            2
+        );
+        assert_eq!(
+            count_kind(&db, Some("atproto"), "app.bsky.feed.like")
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            purge_kind(&db, None, "app.bsky.feed.like").await.unwrap(),
+            2
         );
     }
 

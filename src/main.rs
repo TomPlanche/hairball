@@ -44,6 +44,11 @@ enum Command {
         /// Ignore the cursors and reconcile deletions.
         #[arg(long)]
         full: bool,
+
+        /// Read the sources and show what would change, without changing the
+        /// database (the run writes to a temporary copy).
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Write the calendar JSON.
@@ -55,6 +60,10 @@ enum Command {
         /// Output file. Wins over `out` in `[export]`. Without both: stdout.
         #[arg(long)]
         out: Option<PathBuf>,
+
+        /// Build the calendar and show what would be written, without writing.
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Show each source: last run, cursor and row counts.
@@ -68,6 +77,10 @@ enum Command {
         /// The kind to delete (for example `app.bsky.feed.like`).
         #[arg(long)]
         kind: String,
+
+        /// Count the rows that would be deleted, without deleting them.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -192,32 +205,74 @@ async fn run(cli: Cli, bars: Option<MultiProgress>) -> anyhow::Result<()> {
         .with_context(|| format!("cannot load the config file {}", cli.config.display()))?;
 
     match cli.command {
-        Command::Sync { source, full } => {
+        Command::Sync {
+            source,
+            full,
+            dry_run,
+        } => {
+            if dry_run {
+                return sync_dry_run(&config, source.as_deref(), full, bars.as_ref()).await;
+            }
             let db = open_db(&config).await?;
-            sync(&config, &db, source.as_deref(), full, bars.as_ref()).await
+            sync(&config, &db, source.as_deref(), full, false, bars.as_ref()).await
         }
-        Command::Export { year, out } => {
+        Command::Export { year, out, dry_run } => {
             let db = open_db(&config).await?;
             // `--out` wins over the config: useful for a test by hand.
             let out = out.or_else(|| config.export.out.clone());
-            export(&config, &db, year, out.as_deref()).await
+            export(&config, &db, year, out.as_deref(), dry_run).await
         }
         Command::Status => {
             let db = open_db(&config).await?;
             status(&config, &db).await
         }
         Command::Check => check(&config).await,
-        Command::Purge { kind } => {
+        Command::Purge { kind, dry_run } => {
             let db = open_db(&config).await?;
-            purge(&config, &db, &kind).await
+            purge(&config, &db, &kind, dry_run).await
         }
     }
 }
 
-/// Deletes all the events of one kind, in all sources.
-async fn purge(config: &Config, db: &SqlitePool, kind: &str) -> anyhow::Result<()> {
-    let rows = db::purge_kind(db, None, kind).await?;
-    println!("deleted {rows} events of kind `{kind}`");
+/// Runs the sync on a temporary copy of the database, then deletes the copy:
+/// the logs show what would change, and the database stays as it is.
+///
+/// The sources still receive their read requests (and the bookmarks a login).
+async fn sync_dry_run(
+    config: &Config,
+    only: Option<&str>,
+    full: bool,
+    bars: Option<&MultiProgress>,
+) -> anyhow::Result<()> {
+    let copy = std::env::temp_dir().join(format!("hairball-dry-run-{}.db", std::process::id()));
+    // A copy left by a crashed run with the same process id.
+    let _ = std::fs::remove_file(&copy);
+    info!(
+        copy = %copy.display(),
+        "dry run: the sync writes to a temporary copy, the database does not change"
+    );
+
+    let db = db::open_copy(&config.database, &copy)
+        .await
+        .with_context(|| format!("cannot copy the database {}", config.database.display()))?;
+    let result = sync(config, &db, only, full, true, bars).await;
+    db.close().await;
+    if let Err(error) = std::fs::remove_file(&copy) {
+        warn!(copy = %copy.display(), "cannot delete the temporary copy: {error}");
+    }
+    result
+}
+
+/// Deletes all the events of one kind, in all sources. With `dry_run`, only
+/// counts them.
+async fn purge(config: &Config, db: &SqlitePool, kind: &str, dry_run: bool) -> anyhow::Result<()> {
+    if dry_run {
+        let rows = db::count_kind(db, None, kind).await?;
+        println!("dry run: would delete {rows} events of kind `{kind}`");
+    } else {
+        let rows = db::purge_kind(db, None, kind).await?;
+        println!("deleted {rows} events of kind `{kind}`");
+    }
 
     // A purge of a kind that the config still wants only lasts until the next sync.
     if let Some(atproto) = &config.atproto
@@ -233,14 +288,21 @@ async fn purge(config: &Config, db: &SqlitePool, kind: &str) -> anyhow::Result<(
 }
 
 /// Runs each planned source, or only `only`. One failing source does not stop
-/// the others: the command fails at the end.
+/// the others: the command fails at the end. `dry_run` only changes the words
+/// of the logs: [`sync_dry_run`] gives a copy of the database.
 async fn sync(
     config: &Config,
     db: &SqlitePool,
     only: Option<&str>,
     full: bool,
+    dry_run: bool,
     bars: Option<&MultiProgress>,
 ) -> anyhow::Result<()> {
+    let done = if dry_run {
+        "dry run, would change"
+    } else {
+        "sync done"
+    };
     let mut planned = sources::plan(config);
     if let Some(only) = only {
         let ids: Vec<_> = planned.iter().map(Planned::id).collect();
@@ -281,7 +343,7 @@ async fn sync(
                     bar.bar.finish_and_clear();
                 }
                 match result {
-                    Ok(report) => info!(source = %id, "sync done: {report}"),
+                    Ok(report) => info!(source = %id, "{done}: {report}"),
                     Err(e) => {
                         error!(source = %id, "sync failed: {}", error_chain(&e));
                         failed.push(id);
@@ -340,12 +402,13 @@ async fn check(config: &Config) -> anyhow::Result<()> {
 }
 
 /// Writes the calendar JSON of one year (default: the current year) to `out`,
-/// or to stdout.
+/// or to stdout. With `dry_run`, builds it and logs what would be written.
 async fn export(
     config: &Config,
     db: &SqlitePool,
     year: Option<i16>,
     out: Option<&Path>,
+    dry_run: bool,
 ) -> anyhow::Result<()> {
     let year = year.unwrap_or_else(|| time::day(Timestamp::now(), &config.time_zone).year());
     let from = Date::new(year, 1, 1).with_context(|| format!("invalid year {year}"))?;
@@ -355,6 +418,18 @@ async fn export(
         .await
         .context("cannot build the calendar")?;
     let json = serde_json::to_string(&calendar)?;
+
+    if dry_run {
+        let destination = out.map_or_else(|| "stdout".to_owned(), |p| p.display().to_string());
+        info!(
+            %destination,
+            days = calendar.days.len(),
+            sources = calendar.sources.len(),
+            bytes = json.len(),
+            "dry run: calendar not written"
+        );
+        return Ok(());
+    }
 
     match out {
         None => println!("{json}"),

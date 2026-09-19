@@ -67,16 +67,31 @@ The binary is `target/release/hairball`.
 ```
 hairball [--config <path>] <command>
 
-  sync [--source <id>] [--full]   Run all enabled sources, or only one.
-  export [--year <YYYY>] [--out <path>]
+  sync [--source <id>] [--full] [--dry-run]
+                                  Run all enabled sources, or only one.
+  export [--year <YYYY>] [--out <path>] [--dry-run]
                                   Write the calendar JSON (default: `out` in
                                   `[export]`, else stdout).
   status                          Show each source: last run, cursor and row counts.
   check                           Check that the secrets are set, valid and accepted.
-  purge --kind <kind>             Delete all rows of one kind.
+  purge --kind <kind> [--dry-run] Delete all rows of one kind.
 ```
 
 Run `hairball --help` or `hairball <command> --help` for the full list of options.
+
+### Dry run
+
+The 3 commands that write have a `--dry-run` option. It shows what the command would do, and changes nothing:
+
+| Command | With `--dry-run` |
+| ------- | ---------------- |
+| `sync` | The CLI copies the database to a temporary file, runs the sync on the copy, then deletes the copy. The logs show the real counts (`dry run, would change: N inserted, ... P purged`), and the database stays as it is. |
+| `export` | The CLI builds the calendar, then logs the destination, the number of days and sources, and the size. It writes no file and prints no JSON. |
+| `purge` | The CLI counts the rows of the kind (`dry run: would delete N events`). |
+
+Use it before a change of the config, for example a new `exclude` entry: `sync --dry-run` shows how many rows the purge would delete.
+
+A dry run of `sync` still sends its requests to the sources: they are read-only, except the login of the bookmarks source, which opens and closes a session. The source logs (`purged: disabled in the config`) keep their normal words: the last line of each source (`dry run, would change`) is the one that tells that nothing changed. `status` and `check` change nothing, so they have no `--dry-run`.
 
 ## Configuration
 
@@ -541,3 +556,11 @@ cargo run --release -- sync --full
 Each source must show a bar or a spinner while it runs, then its `sync done` line. With `cargo run -- sync --full 2> sync.log`, `sync.log` must contain only log lines, without any bar.
 
 The systemd units have no automatic test here: check them on the server with `systemd-analyze verify` (step 4 of "Install"). After the first full sync (step 5), `journalctl` must show one `sync done` or `sync failed` line per source, then `calendar written`, and `/srv/hairball/calendar.json` must exist. `systemctl list-timers 'hairball*'` must show the 2 timers.
+
+The unit tests check the copy of the database for a dry run (the writes to the copy do not change the source, and a missing database gives an empty copy), and the count of `purge --dry-run`. To check it by hand, compute the checksum of the database, run the 3 dry runs, then compute it again:
+
+```bash
+shasum hairball.db && cargo run -- sync --dry-run && cargo run -- purge --kind app.bsky.feed.like --dry-run && cargo run -- export --dry-run && shasum hairball.db
+```
+
+The 2 checksums must be equal, no `hairball-dry-run-*.db` file must stay in the temporary directory, and no export file must be written.
