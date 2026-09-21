@@ -248,30 +248,10 @@ impl Atproto {
 ///   collection, `*.feed.like` matches the likes of every app.
 pub fn exclude_matches(pattern: &str, nsid: &str) -> bool {
     if pattern.contains('*') {
-        wildcard_matches(pattern, nsid)
+        crate::pattern::matches(pattern, nsid)
     } else {
         nsid == pattern || nsid.starts_with(&format!("{pattern}."))
     }
-}
-
-/// Matches `text` against `pattern`, where `*` matches any characters.
-fn wildcard_matches(pattern: &str, text: &str) -> bool {
-    let parts: Vec<&str> = pattern.split('*').collect();
-    // `split` gives at least one part: `pattern` contains `*`, so at least 2.
-    let (Some(first), Some(last)) = (parts.first(), parts.last()) else {
-        return false;
-    };
-    let Some(mut rest) = text.strip_prefix(first) else {
-        return false;
-    };
-    // The middle parts, in order, each after the previous one.
-    for part in &parts[1..parts.len() - 1] {
-        match rest.find(part) {
-            Some(index) => rest = &rest[index + part.len()..],
-            None => return false,
-        }
-    }
-    rest.ends_with(last)
 }
 
 /// Stores one record as an event. The event time follows [`time::event_time`].

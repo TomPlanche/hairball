@@ -72,9 +72,11 @@ enum Command {
     /// Check that the secrets are set, valid and accepted by each API.
     Check,
 
-    /// Delete all rows of one kind (manual cleanup).
+    /// Delete all rows of one kind, or of the kinds that match a pattern.
     Purge {
-        /// The kind to delete (for example `app.bsky.feed.like`).
+        /// The kind to delete (`app.bsky.feed.like`), or a pattern where `*`
+        /// matches any characters (`'app.rocksky.*'`). Quote a pattern: the
+        /// shell expands `*` before the CLI sees it.
         #[arg(long)]
         kind: String,
 
@@ -263,26 +265,47 @@ async fn sync_dry_run(
     result
 }
 
-/// Deletes all the events of one kind, in all sources. With `dry_run`, only
-/// counts them.
-async fn purge(config: &Config, db: &SqlitePool, kind: &str, dry_run: bool) -> anyhow::Result<()> {
-    if dry_run {
-        let rows = db::count_kind(db, None, kind).await?;
-        println!("dry run: would delete {rows} events of kind `{kind}`");
-    } else {
-        let rows = db::purge_kind(db, None, kind).await?;
-        println!("deleted {rows} events of kind `{kind}`");
+/// Deletes all the events of the kinds that match `pattern`, in all sources.
+/// With `dry_run`, only counts them.
+async fn purge(
+    config: &Config,
+    db: &SqlitePool,
+    pattern: &str,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    let kinds = db::kinds_matching(db, pattern).await?;
+    if kinds.is_empty() {
+        println!("no event of a kind that matches `{pattern}`");
+        return Ok(());
     }
 
-    // A purge of a kind that the config still wants only lasts until the next sync.
-    if let Some(atproto) = &config.atproto
-        && Atproto::new(atproto).wants(kind)
-        && kind.contains('.')
-    {
-        warn!(
-            %kind,
-            "the next sync adds this kind again: add it to `exclude` in `[atproto]` to keep it out"
-        );
+    let atproto = config.atproto.as_ref().map(Atproto::new);
+    let mut total = 0;
+    for kind in &kinds {
+        if dry_run {
+            let rows = db::count_kind(db, None, kind).await?;
+            println!("dry run: would delete {rows} events of kind `{kind}`");
+            total += u64::try_from(rows).unwrap_or(0);
+        } else {
+            let rows = db::purge_kind(db, None, kind).await?;
+            println!("deleted {rows} events of kind `{kind}`");
+            total += rows;
+        }
+
+        // A purge of a kind that the config still wants only lasts until the next sync.
+        if let Some(atproto) = &atproto
+            && atproto.wants(kind)
+            && kind.contains('.')
+        {
+            warn!(
+                %kind,
+                "the next sync adds this kind again: add it to `exclude` in `[atproto]` to keep it out"
+            );
+        }
+    }
+    if kinds.len() > 1 {
+        let verb = if dry_run { "would delete" } else { "deleted" };
+        println!("{verb} {total} events in {} kinds", kinds.len());
     }
     Ok(())
 }

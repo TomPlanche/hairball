@@ -6,6 +6,7 @@ pub mod db;
 pub mod export;
 pub mod http;
 pub mod identity;
+pub mod pattern;
 pub mod progress;
 pub mod registry;
 pub mod sources;

@@ -74,7 +74,9 @@ hairball [--config <path>] <command>
                                   `[export]`, else stdout).
   status                          Show each source: last run, cursor and row counts.
   check                           Check that the secrets are set, valid and accepted.
-  purge --kind <kind> [--dry-run] Delete all rows of one kind.
+  purge --kind <kind|pattern> [--dry-run]
+                                  Delete all rows of one kind, or of the kinds
+                                  that match a pattern with `*`.
 ```
 
 Run `hairball --help` or `hairball <command> --help` for the full list of options.
@@ -147,7 +149,15 @@ To delete the rows of one kind by hand, use `purge`:
 cargo run -- purge --kind app.rocksky.album
 ```
 
-If the config still wants this kind, the command warns you: the next sync adds the rows again. Add the kind to `exclude` to keep it out.
+`--kind` also accepts a pattern, where `*` matches any characters: `'app.rocksky.*'` deletes every Rocksky kind, `'*.feed.like'` the likes of every app. The command prints one line per kind, then the total. Without `*`, the kind must be equal: unlike `exclude`, `purge --kind app.rocksky` deletes nothing, so that a purge never deletes more than you asked.
+
+Put the pattern in single quotes. If not, the shell tries to expand `*` to file names before the CLI sees it, and fish stops with `No matches for wildcard`:
+
+```bash
+cargo run -- purge --kind 'app.rocksky.*' --dry-run
+```
+
+If the config still wants a kind, the command warns you: the next sync adds its rows again. Add the kind to `exclude` to keep it out.
 
 ### Gitea, Forgejo and Codeberg
 
@@ -564,3 +574,11 @@ shasum hairball.db && cargo run -- sync --dry-run && cargo run -- purge --kind a
 ```
 
 The 2 checksums must be equal, no `hairball-dry-run-*.db` file must stay in the temporary directory, and no export file must be written.
+
+The unit tests check the patterns (`src/pattern.rs`) and the kinds that a pattern selects in the database. To check `purge` with a pattern, run it first as a dry run, with the pattern in quotes:
+
+```bash
+cargo run -- purge --kind 'app.bsky.feed.*' --dry-run
+```
+
+The command must print one `would delete` line per matching kind (for example `app.bsky.feed.like` and `app.bsky.feed.post`), then `would delete N events in K kinds`. A pattern without a match must print `no event of a kind that matches`.

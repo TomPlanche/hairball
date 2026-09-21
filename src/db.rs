@@ -285,6 +285,19 @@ pub async fn purge_kind(db: &SqlitePool, source: Option<&str>, kind: &str) -> Re
     Ok(result.rows_affected())
 }
 
+/// The distinct kinds of all the events that match `pattern` (see
+/// [`crate::pattern::matches`]: `*` matches any characters, and without `*`
+/// the kind must be equal to the pattern).
+pub async fn kinds_matching(db: &SqlitePool, pattern: &str) -> Result<Vec<String>, DbError> {
+    let kinds: Vec<String> = sqlx::query_scalar("SELECT DISTINCT kind FROM events ORDER BY kind")
+        .fetch_all(db)
+        .await?;
+    Ok(kinds
+        .into_iter()
+        .filter(|kind| crate::pattern::matches(pattern, kind))
+        .collect())
+}
+
 /// Counts the events of one kind, like [`purge_kind`] would delete them.
 pub async fn count_kind(db: &SqlitePool, source: Option<&str>, kind: &str) -> Result<i64, DbError> {
     Ok(sqlx::query_scalar(
@@ -590,6 +603,27 @@ mod tests {
         assert!(!source.exists());
         copied.close().await;
         std::fs::remove_file(&copy).unwrap();
+    }
+
+    #[tokio::test]
+    async fn kinds_match_a_pattern_or_an_exact_name() {
+        let db = open_in_memory().await.unwrap();
+        insert(&db, "atproto", "app.rocksky.scrobble", "s1").await;
+        insert(&db, "atproto", "app.rocksky.song", "s2").await;
+        insert(&db, "atproto", "app.bsky.feed.post", "p1").await;
+        insert(&db, "lastfm", "scrobble", "l1").await;
+
+        assert_eq!(
+            kinds_matching(&db, "app.rocksky.*").await.unwrap(),
+            ["app.rocksky.scrobble", "app.rocksky.song"]
+        );
+        assert_eq!(
+            kinds_matching(&db, "*scrobble").await.unwrap(),
+            ["app.rocksky.scrobble", "scrobble"]
+        );
+        assert_eq!(kinds_matching(&db, "scrobble").await.unwrap(), ["scrobble"]);
+        // Without `*`, no prefix match: a purge must not delete more than asked.
+        assert!(kinds_matching(&db, "app.rocksky").await.unwrap().is_empty());
     }
 
     #[tokio::test]
